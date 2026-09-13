@@ -112,6 +112,25 @@ def publish(config):
             future.result()
 
 
+def connect_operator(args):
+    """Open only the assigned loopback operator port, using pinned SSH host trust."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]{0,252}', args.host):
+        raise ValueError('Invalid tunnel host')
+    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]{0,63}', args.user):
+        raise ValueError('Invalid tunnel account')
+    if not 1024 <= args.remote_port <= 65535:
+        raise ValueError('Invalid assigned operator port')
+    for path in (args.identity, args.known_hosts):
+        if not path.is_file(): raise ValueError('Tunnel key and administrator-verified known-hosts file are required')
+    if args.identity.stat().st_mode & 0o077:
+        raise ValueError('Tunnel private key must be readable only by its owner')
+    return subprocess.call(['ssh', '-N', '-T', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+        '-o', 'StrictHostKeyChecking=yes', '-o', 'UserKnownHostsFile=' + str(args.known_hosts.resolve()),
+        '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
+        '-o', 'ConnectTimeout=10', '-i', str(args.identity.resolve()),
+        '-R', f'127.0.0.1:{args.remote_port}:127.0.0.1:8096', args.user + '@' + args.host])
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='BluPe Playground robot controller')
     parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
@@ -126,8 +145,15 @@ def main(argv=None):
     commands.add_parser('run', help='Start local YAM console; operator must explicitly launch arms')
     commands.add_parser('cameras', help='Capture cameras on loopback port 8089')
     commands.add_parser('publish-cameras', help='Upload fresh snapshots through the existing robot API')
+    tunnel = commands.add_parser('connect-operator', help='Connect the local operator console through an administrator-provisioned SSH tunnel')
+    tunnel.add_argument('--host', default='100.61.149.60')
+    tunnel.add_argument('--user', required=True)
+    tunnel.add_argument('--remote-port', type=int, required=True)
+    tunnel.add_argument('--identity', type=Path, required=True)
+    tunnel.add_argument('--known-hosts', type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        if args.command == 'connect-operator': return connect_operator(args)
         if args.command == 'setup':
             setup(args); return 0
         config = load(args.config)

@@ -18,7 +18,7 @@ Extract it, then on Linux with Python 3.10–3.12 and venv/pip available:
 python3 install.py --driver-path /path/to/your/validated/i2rt
 ```
 
-The installer creates `~/.local/share/blupe-controller/0.1.0a1/venv`, installs the
+The installer creates `~/.local/share/blupe-controller/0.1.0a2/venv`, installs the
 bundled wheel and pinned Python runtime dependencies, and writes systemd user
 service templates. Internet access is needed for dependencies. i2rt is not bundled
 or silently downloaded: use the tested driver checkout for your robot, including
@@ -34,7 +34,7 @@ file, readable only by you. Operator dashboard assignment and the outbound tunne
 are currently provisioned separately. **Pairing codes are not implemented yet.**
 
 ```sh
-CONTROLLER="$HOME/.local/share/blupe-controller/0.1.0a1/venv/bin/blupe-controller"
+CONTROLLER="$HOME/.local/share/blupe-controller/0.1.0a2/venv/bin/blupe-controller"
 "$CONTROLLER" setup --robot-id YOUR_ROBOT_ID --api https://YOUR_SESSION_API \
   --token-file "$HOME/.config/blupe-controller/device-token" --cameras 10 16 4
 "$CONTROLLER" doctor
@@ -58,7 +58,7 @@ After diagnostics pass, run in separate terminals:
 Open `http://127.0.0.1:8096` locally. Arms remain disabled until an operator launches
 them. Automatic queue startup starts paused. Camera capture is loopback-only;
 fresh snapshots upload to robot-scoped API routes. The hosted low-latency composite
-video pipeline and operator tunnel are not packaged in this first alpha.
+video pipeline is not packaged in this alpha; see below for the operator tunnel command.
 
 **Do not connect a second hardware setup to the shared production queue yet:**
 robot-specific cloud dispatch is a separate platform change. Test against an
@@ -85,3 +85,24 @@ recordings, or evaluation datasets are included.
 See `THIRD-PARTY-NOTICES.md` for model and dependency attribution. This alpha makes
 no license grant for first-party code; third-party notices retain their original
 terms. A first-party license can be chosen before a stable release.
+
+## Operator dashboard connection
+
+Sign into https://operator-blupe-yam.100-61-149-60.sslip.io/ with your operator
+username/password after the multi-account portal is deployed. Your administrator
+must assign your robot to your account and reserve a dedicated loopback tunnel
+port. The controller uses a separate SSH key, never your dashboard password.
+
+With the controller running locally, start the provisioned tunnel:
+
+```sh
+"$CONTROLLER" connect-operator --user YOUR_TUNNEL_ACCOUNT \
+  --remote-port YOUR_ASSIGNED_PORT --identity /path/to/private-key \
+  --known-hosts /path/to/administrator-verified-known-hosts
+```
+
+The SSH server must restrict this key to the assigned loopback forwarding port;
+use a dedicated account with no shell access. Host verification is mandatory.
+This command forwards the operator console on local port 8096; the existing
+independent hard-off service/tunnel on 8098 remains separately provisioned.
+It neither creates a cloud account nor changes the cloud dashboard deployment.

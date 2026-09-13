@@ -4,8 +4,8 @@ from pathlib import Path
 import tarfile
 
 root=Path(__file__).resolve().parents[1]
-version='0.1.0a1'
-wheels=list((root/'dist').glob('*.whl'))
+version='0.1.0a2'
+wheels=list((root/'dist').glob(f'*{version}*.whl'))
 if len(wheels)!=1:
     raise SystemExit('Build exactly one wheel in dist/ first: python -m pip wheel --no-deps . -w dist')
 name=f'blupe-playground-robot-controller-{version}'

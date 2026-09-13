@@ -8,7 +8,7 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--prefix', type=Path, default=Path.home()/'.local/share/blupe-controller/0.1.0a1')
+    parser.add_argument('--prefix', type=Path, default=Path.home()/'.local/share/blupe-controller/0.1.0a2')
     parser.add_argument('--driver-path', type=Path, help='Optional local checkout of your validated, patched i2rt driver')
     args = parser.parse_args()
     if sys.platform != 'linux' or not (3, 10) <= sys.version_info[:2] < (3, 13):

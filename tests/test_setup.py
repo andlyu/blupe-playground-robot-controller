@@ -42,3 +42,19 @@ class SetupTests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+
+class TunnelTests(unittest.TestCase):
+    def test_only_assigned_loopback_port_and_strict_host_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key=Path(directory)/'key'; key.write_text('fixture'); key.chmod(0o600)
+            hosts=Path(directory)/'hosts'; hosts.write_text('fixture')
+            with patch('blupe_controller.cli.subprocess.call',return_value=0) as call:
+                self.assertEqual(main(['connect-operator','--user','robot-isaac','--remote-port','28096','--identity',str(key),'--known-hosts',str(hosts)]),0)
+                command=call.call_args.args[0]
+                self.assertIn('127.0.0.1:28096:127.0.0.1:8096',command)
+                self.assertIn('StrictHostKeyChecking=yes',command)
+                self.assertIn('ExitOnForwardFailure=yes',command)
+                self.assertNotIn('0.0.0.0',str(command))
+            key.chmod(0o644)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit), patch('subprocess.call',side_effect=AssertionError('Started')):
+                main(['connect-operator','--user','robot-isaac','--remote-port','28096','--identity',str(key),'--known-hosts',str(hosts)])

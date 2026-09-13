@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blupe-playground-robot-controller"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Local YAM controller for BluPe Playground"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
