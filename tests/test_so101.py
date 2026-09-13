@@ -103,8 +103,9 @@ class OperatorTests(unittest.TestCase):
         operator.action({'action':'capture_home'})
         driver.enable.assert_not_called()
         driver.move.assert_not_called()
-        operator.action({'action':'home'})
-        driver.move.assert_called_once_with([1,2,3,4,5], .4)
+        with self.assertRaises(ValueError):
+            operator.action({'action':'home'})
+        driver.move.assert_not_called()
 
     def test_so101_setup_private_and_camera_names(self):
         from blupe_controller.cli import main, load

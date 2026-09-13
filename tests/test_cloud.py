@@ -67,3 +67,11 @@ class CloudTests(unittest.TestCase):
         self.assertTrue(self.driver.held)
         self.assertIsNone(self.bridge.lease)
         self.assertFalse(self.bridge.ready)
+
+
+def test_home_and_trajectory_share_so101_tolerance():
+    state = {'joints_deg':[1.9]*5, 'gripper':.1}
+    assert CloudBridge.near(state,[0.]*5,.1)
+    assert CloudBridge.near(state,[0.]*5,.1,joint_tolerance_deg=5.)
+    state['joints_deg'][0]=5.1
+    assert not CloudBridge.near(state,[0.]*5,.1,joint_tolerance_deg=5.)

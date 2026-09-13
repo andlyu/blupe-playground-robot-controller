@@ -21,4 +21,4 @@ where = ["src"]
 include = ["blupe_controller*"]
 
 [tool.setuptools.package-data]
-blupe_controller = ["runtime/assets/**/*", "runtime/config/*.json", "runtime/deploy/operator/*.json"]
+blupe_controller = ["templates/*.html","runtime/assets/**/*", "runtime/config/*.json", "runtime/deploy/operator/*.json"]

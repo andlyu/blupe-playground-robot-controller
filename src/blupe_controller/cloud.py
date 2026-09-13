@@ -1,4 +1,5 @@
 """Robot-scoped cloud bridge. Each queue handoff requires explicit operator action."""
+from .tolerances import near_pose
 import json
 from pathlib import Path
 import threading
@@ -82,9 +83,7 @@ class CloudBridge:
                 'images':{role:{'url':f'{self.config["api"]}/v1/robots/{self.config["robot_id"]}/cameras/{role}.jpg'}
                           for role in self.config['cameras']}}
 
-    @staticmethod
-    def near(state, joints, gripper):
-        return max(abs(a-b) for a,b in zip(state['joints_deg'],joints)) < 1 and abs(state['gripper']-gripper)<.02
+    near = staticmethod(near_pose)
 
     def observation(self):
         state = self.driver.state()

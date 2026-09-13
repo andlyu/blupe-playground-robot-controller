@@ -24,11 +24,33 @@ operator panel. The released `v0.1.0-alpha.2` bundle remains YAM-only.
 **SO101 developer integration (source checkout):** LeRobot's Python SO101 robot
 and configuration, a local operator panel, and named camera capture/publishing.
 There is no C++ worker for SO101. The cloud bridge supports robot-specific joint
-commands and trajectories, with explicit operator queue handoff. Physical motion
-is not yet commissioned; cameras use fresh snapshots and local MJPEG.
+commands and trajectories, with explicit operator queue handoff. Joint trajectories have been exercised on the development SO101; cameras use
+fresh snapshots and local MJPEG. Each new robot still needs its own calibration
+and attended hardware checks.
 See [SO101 setup](docs/SO101.md).
 
 Installation never starts motors or services.
+
+## Code layout
+
+One command, `blupe-controller --config <profile.json> run`, selects the runtime
+from the profile's `hardware` field (`yam` or `so101`). Imports are lazy, so SO101
+does not load YAM hardware dependencies and YAM does not load LeRobot.
+
+- `backends/`: runtime selection and robot-specific startup.
+- `so101.py`: LeRobot driver; `operator.py` and `cloud.py`: its operator/session loop.
+- `runtime/`: existing YAM native-worker, safety, and session implementation.
+- `templates/operator.html`: shared console layout with hardware-specific bindings.
+- `tolerances.py`: SO101's 5° completion/home tolerance; calibration still bounds targets.
+- `lerobot_config.py`, camera relay/publisher, and CLI: setup and camera integration.
+
+YAM and SO101 intentionally retain different motor execution paths. The current
+`RobotDriver` protocol describes the single-arm SO101 interface; YAM has not been
+forced into that interface. A new robot needs a backend and a validated hardware
+adapter; it must not silently inherit another robot's safety or home behavior.
+Astra prompts and Cartesian IK belong to the Playground runner, which sends this
+controller joint waypoints. Private credentials and this Mac's calibration stay
+outside source control.
 
 ## Adapting the controller to your arm
 
