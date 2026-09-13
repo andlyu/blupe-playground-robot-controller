@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "frame": "yam_bimanual/base_link",
+  "tcp_links": {
+    "left": "left_grasp",
+    "right": "right_grasp"
+  },
+  "rest_tip_m": {
+    "left": [0.246831991, 0.356375806, 0.147328535],
+    "right": [0.246831991, -0.343624194, 0.147328535]
+  },
+  "table_z_m": -0.16,
+  "workspace_m": {
+    "forward": 0.50,
+    "backward": 0.10,
+    "outward": 0.20,
+    "inward": 0.50,
+    "up": 0.40,
+    "down": 0.16,
+    "minimum_table_clearance": 0.10
+  },
+  "joint_lower_rad": [
+    -2.61799, 0.0, 0.0, -1.5708, -1.5708, -2.0944,
+    -2.61799, 0.0, 0.0, -1.5708, -1.5708, -2.0944
+  ],
+  "joint_upper_rad": [
+    3.05433, 3.65, 3.66519, 1.5708, 1.5708, 2.0944,
+    3.05433, 3.65, 3.66519, 1.5708, 1.5708, 2.0944
+  ],
+  "start_limit_tolerance_rad": 0.005,
+  "max_adjacent_delta_rad": 0.06,
+  "max_joint_velocity_rad_s": 0.35,
+  "sweep_resolution_rad": 0.01,
+  "max_waypoints": 600,
+  "collision_required": true
+}

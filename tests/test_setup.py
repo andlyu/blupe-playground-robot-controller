@@ -1,0 +1,44 @@
+import contextlib
+import io
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from blupe_controller.cli import main, validate
+
+
+class SetupTests(unittest.TestCase):
+    def config(self):
+        return {'version':1, 'hardware':'yam','robot_id':'test-yam','api':'https://api.example',
+                'token_file':'/tmp/device-credential', 'cameras':{'left':1,'top':2,'right':3}}
+
+    def test_setup_is_private_and_does_not_start_hardware(self):
+        with tempfile.TemporaryDirectory() as directory, patch('subprocess.Popen', side_effect=AssertionError('Process started')):
+            path=Path(directory)/'config.json'
+            args=['--config',str(path),'setup','--robot-id','test-yam','--api','https://api.example','--token-file',str(Path(directory)/'credential'),'--cameras','1','2','3']
+            with contextlib.redirect_stdout(io.StringIO()): self.assertEqual(main(args),0)
+            self.assertEqual(path.stat().st_mode & 0o777,0o600)
+            saved=json.loads(path.read_text());self.assertEqual(saved['settings'],{})
+            self.assertEqual(saved['cameras'],{'left':1,'top':2,'right':3})
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit): main(args)
+
+    def test_reject_unsupported_hardware(self):
+        with self.assertRaises(ValueError): validate({**self.config(),'hardware':'so101'})
+
+    def test_invalid_origins_and_identity(self):
+        for value in ['http://api.example','https://secret@api.example','https://api.example/path','https://api.example/?token=x']:
+            with self.assertRaises(ValueError): validate({**self.config(),'api':value})
+        with self.assertRaises(ValueError): validate({**self.config(),'robot_id':'../wrong'})
+
+    def test_duplicate_cameras_rejected(self):
+        with self.assertRaises(ValueError): validate({**self.config(),'cameras':{'left':1,'top':1,'right':2}})
+
+    def test_doctor_does_not_open_devices(self):
+        from blupe_controller.cli import doctor
+        with patch('subprocess.Popen', side_effect=AssertionError('Process started')), contextlib.redirect_stdout(io.StringIO()):
+            self.assertFalse(doctor(self.config()))
+
+
+if __name__=='__main__': unittest.main()

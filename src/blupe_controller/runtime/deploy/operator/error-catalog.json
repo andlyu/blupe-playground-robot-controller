@@ -1,0 +1,42 @@
+{
+  "communication_loss": {
+    "name": "Motor lost communication (0xD)",
+    "meaning": "A motor reported a communication fault. The message alone does not tell us why.",
+    "handling": "The run pauses while the robot tries a short recovery on that motor. It resumes only after feedback and position checks pass. Otherwise, the run ends and the queue pauses for the operator."
+  },
+  "feedback_timeout": {
+    "name": "Motor did not reply",
+    "meaning": "The controller did not receive an expected motor reply. This is different from a motor reporting 0xD.",
+    "handling": "The controller retries within its limits. If required feedback is still missing, the run ends and the queue pauses. Missing replies alone do not trigger a motor reset."
+  },
+  "joint_timeout": {
+    "name": "Joint did not reach its target",
+    "meaning": "A joint did not reach the requested angle in time. This does not tell us whether something blocked it.",
+    "handling": "Motion stops at the measured position. If motor feedback is fresh and healthy, the model receives the error and new observations so it can choose a smaller move or another approach. The same run and countdown continue. A motor fault, unsafe hold, Stop or time limit still ends recovery."
+  },
+  "gripper_delta": {
+    "name": "Gripper move too large",
+    "meaning": "The command asked the gripper to change its opening too much in one step.",
+    "handling": "The move is rejected. If caught during execution, the current cleanup ends the run and requests both arms off. The command needs smaller gripper steps."
+  },
+  "servo_fault": {
+    "name": "Motor fault",
+    "meaning": "A motor reported another fault, such as temperature, voltage or overload, or an unexpected state.",
+    "handling": "The run stops and the queue pauses. Healthy motors continue holding where possible. The operator must inspect the fault; the robot does not automatically reset it."
+  },
+  "time_limit": {
+    "name": "Run time expired",
+    "meaning": "The run used all of its selected time.",
+    "handling": "The run ends as a failure. Motion is cancelled, and the robot attempts to park and turn the motors off if the controller is healthy."
+  },
+  "recording": {
+    "name": "Recording problem",
+    "meaning": "Some images or the recording could not be saved. This alone does not mean a motor failed.",
+    "handling": "The recording error is saved separately and does not reset motors. If the model also loses images it needs, its run may end."
+  },
+  "execution": {
+    "name": "Other run failure",
+    "meaning": "The run failed, but the saved evidence does not identify one of the causes above.",
+    "handling": "The operator checks the recorded error and motor state before restarting. The word “FAULT” alone does not tell us whether the motors are off."
+  }
+}

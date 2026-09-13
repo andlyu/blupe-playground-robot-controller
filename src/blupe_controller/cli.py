@@ -1,0 +1,141 @@
+"""Setup/diagnostics never import hardware drivers or command a robot."""
+import argparse
+import concurrent.futures
+import importlib.util
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import subprocess
+import sys
+from urllib.parse import urlsplit
+
+RUNTIME = Path(__file__).resolve().parent / 'runtime'
+DEFAULT_CONFIG = Path.home() / '.config/blupe-controller/config.json'
+
+
+def validate(config):
+    if config.get('version') != 1 or config.get('hardware') != 'yam':
+        raise ValueError('This release supports the YAM profile only; SO101 calibration is not implemented yet.')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', config.get('robot_id', '')):
+        raise ValueError('Invalid robot ID')
+    origin = urlsplit(config.get('api', ''))
+    if origin.scheme != 'https' or not origin.hostname or origin.username or origin.password or origin.path not in ('', '/') or origin.query or origin.fragment:
+        raise ValueError('Use an HTTPS API origin with no credentials, path or query')
+    if not Path(config.get('token_file', '')).is_absolute():
+        raise ValueError('Use an absolute credential-file path')
+    cameras = config.get('cameras', {})
+    if set(cameras) != {'left', 'top', 'right'} or any(type(v) is not int or v < 0 for v in cameras.values()) or len(set(cameras.values())) != 3:
+        raise ValueError('YAM requires three distinct camera device numbers: left, top, right')
+    return config
+
+
+def load(path):
+    return validate(json.loads(path.read_text()))
+
+
+def setup(args):
+    config = validate({'version': 1, 'hardware': args.hardware, 'robot_id': args.robot_id,
+        'api': args.api.rstrip('/'), 'token_file': str(args.token_file.resolve()),
+        'cameras': dict(zip(('left', 'top', 'right'), args.cameras)), 'settings': {}})
+    args.config.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Never silently overwrite a configured or running controller.
+    fd = os.open(args.config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'w') as file:
+        json.dump(config, file, indent=2)
+        file.write('\n')
+    print(f'Configuration saved: {args.config}. No motors or services started.')
+
+
+def doctor(config):
+    checks = {'linux': sys.platform == 'linux', 'architecture': platform.machine() in {'aarch64','arm64','x86_64'},
+        'bundled_model': (RUNTIME / 'assets/yam_bimanual/scene.xml').is_file(),
+        'bundled_mesh': (RUNTIME / 'assets/yam/assets/base.stl').is_file()}
+    for module in ('numpy','mujoco','ruckig','cv2','websockets','cryptography','i2rt'):
+        checks[module] = importlib.util.find_spec(module) is not None
+    token = Path(config['token_file'])
+    checks['credential_file'] = token.is_file() and token.stat().st_mode & 0o077 == 0 and bool(token.read_text().strip())
+    checks['can_interfaces'] = all((Path('/sys/class/net') / c).exists() for c in ('can0','can1'))
+    for role, device in config['cameras'].items():
+        checks['camera_' + role] = Path(f'/dev/video{device}').exists()
+    for name, ok in checks.items():
+        print(f'{"OK" if ok else "MISSING"} {name}')
+    print('Read-only checks; motor behavior and driver compatibility are not certified by this check.')
+    return all(checks.values())
+
+
+def runtime_path():
+    # Preserve the existing worker's private subprocess/module layout.
+    sys.path.insert(0, str(RUNTIME))
+
+
+def run(config):
+    if sys.platform != 'linux':
+        raise ValueError('YAM hardware control requires Linux')
+    if not doctor(config):
+        raise ValueError('Resolve missing prerequisites before starting the controller')
+    runtime_path()
+    os.environ["BLUPE_CAMERA_ROLES"] = json.dumps({k:str(v) for k,v in config["cameras"].items()})
+    from scripts import yam_operator_hardware_web as hardware
+    state = DEFAULT_CONFIG.parent / 'state'
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.environ['YAM_AUTO_QUEUE_STATE'] = str(state / 'auto-queue.json')
+    # Start paused even if a previous run left a park receipt. Setup/installation
+    # must never replay an automatic-start authorization.
+    if Path(os.environ['YAM_AUTO_QUEUE_STATE']).exists():
+        saved = json.loads(Path(os.environ['YAM_AUTO_QUEUE_STATE']).read_text())
+        saved['enabled'] = False
+        Path(os.environ['YAM_AUTO_QUEUE_STATE']).write_text(json.dumps(saved))
+    sys.argv = ['blupe-controller', '--host', '127.0.0.1', '--port', '8096',
+        '--jetson-id', config['robot_id'], '--jetson-token-file', config['token_file'],
+        '--session-api-base', config['api'], '--session-api-websocket', config['api'].replace('https://','wss://',1) + '/v1/jetsons/connect',
+        '--jetson-camera-base', 'http://127.0.0.1:8089', '--camera-reference-base', 'http://127.0.0.1:8089']
+    return hardware.main()
+
+
+def cameras(config):
+    runtime_path()
+    from YAM_control import camera_relay
+    sys.argv = ['blupe-controller', '--devices', *map(str, config['cameras'].values()), '--host', '127.0.0.1', '--port', '8089']
+    camera_relay.main()
+
+
+def publish(config):
+    runtime_path()
+    from scripts.publish_yam_cameras import publish as upload
+    args = argparse.Namespace(camera_origin='http://127.0.0.1:8089', api=config['api'],
+        jetson_id=config['robot_id'], token_file=config['token_file'])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(upload, args, role, device) for role, device in config['cameras'].items()]
+        for future in futures:
+            future.result()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='BluPe Playground robot controller')
+    parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
+    commands = parser.add_subparsers(dest='command', required=True)
+    s = commands.add_parser('setup', help='Save robot identity and camera configuration; does not move motors')
+    s.add_argument('--robot-id', required=True)
+    s.add_argument('--api', required=True)
+    s.add_argument('--token-file', type=Path, required=True)
+    s.add_argument('--hardware', default='yam')
+    s.add_argument('--cameras', type=int, nargs=3, required=True, metavar=('LEFT','TOP','RIGHT'))
+    commands.add_parser('doctor', help='Check dependencies and device paths without opening hardware')
+    commands.add_parser('run', help='Start local YAM console; operator must explicitly launch arms')
+    commands.add_parser('cameras', help='Capture cameras on loopback port 8089')
+    commands.add_parser('publish-cameras', help='Upload fresh snapshots through the existing robot API')
+    args = parser.parse_args(argv)
+    try:
+        if args.command == 'setup':
+            setup(args); return 0
+        config = load(args.config)
+        if args.command == 'doctor': return 0 if doctor(config) else 1
+        return {'run':run, 'cameras':cameras, 'publish-cameras':publish}[args.command](config)
+    except (ValueError, OSError) as error:
+        parser.exit(2, f'{error}\n')
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
