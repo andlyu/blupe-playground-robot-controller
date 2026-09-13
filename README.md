@@ -15,57 +15,80 @@ Installation never starts motors or services.
 
 ## Adapting the controller to your arm
 
-Start from this repository and add a hardware profile for your robot. This requires
-code changes as well as configuration; the current CLI accepts only `yam`.
+The implementation below is the work required to support another arm; selecting
+a robot type in the dashboard does not implement it automatically.
 
-1. **Connect your servos.** Implement an adapter that connects through your arm’s
-   USB serial, CAN, or other interface, reads joint/gripper positions, executes
-   trajectories, and stops execution. Replace the YAM/i2rt implementation for
-   your profile; use your manufacturer’s SDK or an existing compatible driver.
-   C++ changes are only needed if that driver requires them. Start with
-   [i2rt_bimanual_adapter.py](src/blupe_controller/runtime/YAM_control/i2rt_bimanual_adapter.py)
-   and its [isolated motor worker](src/blupe_controller/runtime/YAM_control/motor_worker.py).
-2. **Define calibration and motion behavior.** Specify servo IDs/order, joint
-   units, gripper conversion, limits, and home/rest positions. Implement explicit
-   enable, hold/stop, disconnect, and torque-off behavior for your arm. Replace
-   the YAM model and two-arm/12-joint assumptions in
-   [hardware_safety.py](src/blupe_controller/runtime/YAM_control/hardware_safety.py)
-   and the local operator controls. Do not reuse YAM home poses or CAN shutdown
-   commands on another robot. For SO101, this means five arm joints plus a gripper,
-   its saved calibration, and a Feetech serial driver.
-3. **Configure images and ports.** Map camera names to the correct devices and
-   choose local camera/operator ports. The current setup requires three cameras
-   named left/top/right and uses ports 8089/8096; make these configurable for your
-   profile in [cli.py](src/blupe_controller/cli.py). The cloud API accepts variable
-   camera names, but the packaged UI and publisher still need the matching changes.
-   JPEG uploads are included; the hosted low-latency video publisher is not.
-4. **Map your arm to the cloud protocol.** Implement the callbacks used by
-   [SessionApiSimClient](src/blupe_controller/runtime/YAM_control/session_api_sim_client.py):
-   preparation, trajectory execution, feedback, heartbeat, and stop. Despite its
-   historical name, this transport is also used by the hardware controller. The
-   API accepts variable-length joint arrays; its current wire names remain
-   `left_joints_deg` and `right_joints_deg`, with grippers separate. A single arm
-   can use the left array and an empty right array. API grippers use 0–1; convert
-   your driver’s units explicitly. Always read `/v1/robots/<robot_id>/queue` and
-   include `robot_id` when creating sessions. The alpha’s
-   [queue reader](src/blupe_controller/runtime/scripts/yam_operator_sim_web.py)
-   still uses `/v1/queue`, which defaults to `yam-1`.
-5. **Support your controller computer.** Add your profile’s dependencies, device
-   checks, and startup path in [cli.py](src/blupe_controller/cli.py),
-   [pyproject.toml](pyproject.toml), and [install.py](install.py). The installer
-   currently requires Linux and generates systemd units. A Mac-connected arm needs
-   a macOS installation/startup path and serial/camera checks instead of Linux CAN
-   checks. Update the local and hosted operator panel for your arm’s controls.
-6. **Validate, then connect.** Test the adapter with simulated hardware first,
-   then validate calibration and feedback before enabling physical commands.
-   Test motion limits, stop/disconnect behavior, camera freshness, and routing to
-   your own robot queue. Create your robot in the operator dashboard and use its
-   generated robot ID and controller credential. Keep that cloud ID separate from
-   any local calibration ID. An administrator still provisions the operator tunnel.
+### 1. Adapt the controller to the robot
 
-The cloud API already supports per-robot queues and routing. You do not need to
-host another API for your arm; you do need a compatible controller adapter and
-operator panel. SO101 and other non-YAM profiles are not implemented in this release.
+**A. Joint control through C++.** Implement your arm’s driver so it can read joint
+positions and move to requested joint targets. Define servo IDs, joint order,
+units, gripper conversion, calibration, and serial/CAN configuration. Continuous
+servo communication must run in an independent **C++ process**, so a Python
+interpreter pause cannot interrupt the communication loop. A C++ extension called
+synchronously from Python alone does not meet this requirement. Python can handle
+setup, UI, and cloud messages; send bounded, timestamped commands to the C++
+process and receive feedback over IPC. The native process must detect stale
+commands and apply the arm’s defined safe behavior. Verify communication timing
+under Python load; using C++ alone does not guarantee real-time scheduling.
+
+Start from the current [YAM adapter](src/blupe_controller/runtime/YAM_control/i2rt_bimanual_adapter.py)
+and [motor worker](src/blupe_controller/runtime/YAM_control/motor_worker.py), but
+replace their hardware-specific implementation. The alpha’s worker is a separate
+Python process; it does **not yet meet this C++ requirement** for the new adapter.
+For SO101, map its five arm joints and separate gripper to the Feetech interface.
+Keep the local calibration ID separate from the cloud robot ID.
+
+**B. Safety precautions.** Implement calibrated position, velocity, and per-command
+movement limits; validate all targets before execution. Define safe enable,
+home/rest, hold, stop, and torque-off behavior for the actual arm. Enforce limits
+and command/connection watchdogs in the native controller so they still work if
+Python or the cloud stops responding. Provide an independent stop path and test
+fault handling. Replace the YAM two-arm/12-joint assumptions in
+[hardware_safety.py](src/blupe_controller/runtime/YAM_control/hardware_safety.py);
+do not reuse YAM home poses or CAN shutdown commands on another robot.
+
+**C. Cameras.** Configure camera names, devices, resolution, and frame rate for
+your setup. Keep camera capture/encoding outside the motor communication process.
+Replace the alpha’s mandatory left/top/right camera mapping with your arm’s layout.
+Verify camera identity and capture timestamps; a repeated old image is not a live
+stream.
+
+### 2. Connect the controller to the platform
+
+**A. Operator access.** Run the robot-specific operator panel on a configurable
+local port and connect it through its assigned authenticated tunnel. The alpha
+uses local port 8096; its separate YAM hard-off service uses 8098. Other arms need
+appropriate controls and a stop implementation. An administrator currently
+provisions dedicated remote loopback ports and the tunnel account. Keep local
+control ports bound to loopback rather than exposing them directly to the internet.
+
+**B. Cloud API connection.** Connect outbound over HTTPS/WSS on port 443 using the
+robot ID and controller credential from the operator dashboard. This connection
+needs no inbound port or SSH tunnel. Reuse the
+[WebSocket transport](src/blupe_controller/runtime/YAM_control/session_api_sim_client.py)
+and implement its preparation, trajectory, feedback, heartbeat, and stop callbacks.
+Use `/v1/robots/<robot_id>/queue` and include `robot_id` in session creation; the
+alpha’s unqualified `/v1/queue` reader still defaults to `yam-1`. The API accepts
+variable-length `left_joints_deg` and `right_joints_deg` arrays and separate 0–1
+gripper values. A single arm can use the left array and an empty right array.
+
+**C. Camera streaming.** Configure the local camera service (port 8089 in the alpha)
+and publish each feed under the correct robot ID. The package includes fresh JPEG
+uploads, but not the hosted low-latency video publisher. Integrate the video
+publisher/receiver and route that robot’s streams into its operator/user views.
+Verify the complete path for correct camera labels, freshness, synchronization
+where needed, reconnect behavior, and visible stream-loss reporting.
+
+Configure dependencies and startup for the controller computer in
+[cli.py](src/blupe_controller/cli.py), [pyproject.toml](pyproject.toml), and
+[install.py](install.py). The alpha is Linux/YAM-only and generates systemd units;
+a Mac-connected arm also needs a macOS installation/startup path.
+
+Validate with simulated hardware, then verify calibration and feedback before
+physical motion tests. Test target execution, safety limits, Python stalls,
+connection loss, stop behavior, and camera streaming before enabling queued runs.
+The cloud API already supports per-robot queues; SO101 and other non-YAM controller
+profiles are not implemented in this release.
 
 ## Download and install
 
