@@ -192,6 +192,8 @@ def main(argv=None):
     s.add_argument('--camera-port', type=int, default=8089)
     s.add_argument('--operator-port', type=int, default=8096)
     s.add_argument('--operator-hostname', default='localhost', help='Allowed hosted operator hostname when tunneled')
+    record = commands.add_parser('record-pose', help='Record current SO101 joints without moving or recalibrating')
+    record.add_argument('name', choices=('zero','home'))
     commands.add_parser('probe', help='Read SO101 positions without enabling torque or writing registers')
     commands.add_parser('doctor', help='Check dependencies and device paths without opening hardware')
     commands.add_parser('run', help='Start hardware console; motion requires explicit enable')
@@ -210,13 +212,26 @@ def main(argv=None):
         if args.command == 'setup':
             setup(args); return 0
         config = load(args.config)
+        if args.command == 'record-pose':
+            if config['hardware'] != 'so101': raise ValueError('Pose recording currently supports SO101')
+            from .so101 import SO101Driver
+            from .poses import PoseStore
+            store = PoseStore(config)
+            if store.path is None: raise ValueError('Use --lerobot-config or configure settings.poses_file for persistent recording')
+            driver = SO101Driver(config).connect()
+            try:
+                pose = store.capture(args.name, driver.state())
+                print(json.dumps({'name':args.name, 'path':str(store.path), **pose}, indent=2))
+                return 0
+            finally:
+                driver.close()
         if args.command == 'probe':
             if config['hardware'] != 'so101': raise ValueError('probe currently supports SO101 only')
             from .so101 import console
             return console(config, probe=True)
         if args.command == 'doctor': return 0 if doctor(config) else 1
         return {'run':run, 'cameras':cameras, 'publish-cameras':publish}[args.command](config)
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, RuntimeError) as error:
         parser.exit(2, f'{error}\n')
 
 

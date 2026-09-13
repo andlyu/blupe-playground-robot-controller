@@ -8,11 +8,13 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from .driver import RobotDriver
+from .poses import PoseStore
 
 PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>BluPe operator</title>
 <style>body{font:16px system-ui;max-width:900px;margin:40px auto;padding:20px;background:#f5f6f8;color:#172036}button,input{font:inherit;padding:10px;margin:4px}img{max-width:420px}pre{white-space:pre-wrap}</style></head>
 <body><h1>BluPe robot operator</h1><p id="identity"></p><p>Starts read-only. Enable holds the current position. Hold stops target changes and retains torque.</p>
 <button onclick="action('enable')">Enable</button><button onclick="action('hold')">Hold</button>
+<button onclick="action('capture_zero')">Capture zero</button><button onclick="action('zero')">Move zero</button>
 <button onclick="action('capture_home')">Capture home</button><button onclick="action('home')">Move home</button>
 <p>Joint targets in degrees, in the displayed joint order. Gripper: 0–1.</p>
 <input id="joints" size="38" placeholder="0, 0, 0, 0, 0"><input id="gripper" type="number" min="0" max="1" step="0.01" value="0.5">
@@ -32,12 +34,13 @@ class Operator:
         self.driver = driver
         self.config = config
         self.lock = threading.Lock()
-        self.home = None
+        self.poses = PoseStore(config)
         self.ticket = secrets.token_urlsafe(32)
 
     def state(self):
         return {**self.driver.state(), 'robot_id':self.config['robot_id'],
-                'cameras':list(self.config['cameras']), 'home_captured':self.home is not None,
+                'cameras':list(self.config['cameras']), 'home_captured':'home' in self.poses.poses,
+                'zero_captured':'zero' in self.poses.poses, 'saved_poses':self.poses.poses,
                 'cloud_execution':'not connected'}
 
     def action(self, payload):
@@ -47,16 +50,12 @@ class Operator:
                 return self.driver.enable()
             if action == 'hold':
                 return self.driver.hold()
-            if action == 'capture_home':
-                state = self.driver.state()
-                if state['mode'] == 'fault':
-                    raise ValueError('Cannot capture home from faulted feedback')
-                self.home = (state['joints_deg'], state['gripper'])
-                return {'home':self.home}
-            if action == 'home':
-                if self.home is None:
-                    raise ValueError('Capture home first; no default home is assumed')
-                return self.driver.move(*self.home)
+            if action in ('capture_home', 'capture_zero'):
+                name = action.removeprefix('capture_')
+                return {name:self.poses.capture(name, self.driver.state())}
+            if action in ('home', 'zero'):
+                pose = self.poses.get(action)
+                return self.driver.move(pose['joints_deg'], pose['gripper'])
             if action == 'move':
                 if not isinstance(payload.get('joints_deg'), list):
                     raise ValueError('Provide joints_deg array')
