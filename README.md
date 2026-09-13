@@ -16,17 +16,41 @@ The controller handles the actual hardware: servo communication, calibration,
 motion execution, and cameras. Adapting it to another arm means implementing
 those hardware-specific parts.
 
-## Current implementation: YAM
+## Supported implementations
 
-**The current implementation is for a bimanual YAM setup on Linux/Jetson.** It is
-a developer alpha, not a universal robot controller. Selecting another robot type
-in the dashboard does not add its driver to this package. To use your own arm,
-adapt the hardware-specific parts below; keep the cloud connection and session
-protocol.
+**YAM:** the existing Linux/Jetson controller, cloud session bridge, and bimanual
+operator panel. The released `v0.1.0-alpha.2` bundle remains YAM-only.
 
-Setup and wheel installation are tested without hardware. Physical operation and
-the external patched i2rt dependency still require validation on the target machine.
+**SO101 developer integration (source checkout):** LeRobot's Python SO101 robot
+and configuration, a local operator panel, and named camera capture/publishing.
+There is no C++ worker for SO101. The cloud bridge supports robot-specific joint
+commands and trajectories, with explicit operator queue handoff. Joint trajectories have been exercised on the development SO101; cameras use
+fresh snapshots and local MJPEG. Each new robot still needs its own calibration
+and attended hardware checks.
+See [SO101 setup](docs/SO101.md).
+
 Installation never starts motors or services.
+
+## Code layout
+
+One command, `blupe-controller --config <profile.json> run`, selects the runtime
+from the profile's `hardware` field (`yam` or `so101`). Imports are lazy, so SO101
+does not load YAM hardware dependencies and YAM does not load LeRobot.
+
+- `backends/`: runtime selection and robot-specific startup.
+- `so101.py`: LeRobot driver; `operator.py` and `cloud.py`: its operator/session loop.
+- `runtime/`: existing YAM native-worker, safety, and session implementation.
+- `templates/operator.html`: shared console layout with hardware-specific bindings.
+- `tolerances.py`: SO101's 5° completion/home tolerance; calibration still bounds targets.
+- `lerobot_config.py`, camera relay/publisher, and CLI: setup and camera integration.
+
+YAM and SO101 intentionally retain different motor execution paths. The current
+`RobotDriver` protocol describes the single-arm SO101 interface; YAM has not been
+forced into that interface. A new robot needs a backend and a validated hardware
+adapter; it must not silently inherit another robot's safety or home behavior.
+Astra prompts and Cartesian IK belong to the Playground runner, which sends this
+controller joint waypoints. Private credentials and this Mac's calibration stay
+outside source control.
 
 ## Adapting the controller to your arm
 
@@ -35,36 +59,25 @@ a robot type in the dashboard does not implement it automatically.
 
 ### 1. Adapt the controller to the robot
 
-**A. Joint control through C++.** Implement your arm’s driver so it can read joint
-positions and move to requested joint targets. Define servo IDs, joint order,
-units, gripper conversion, calibration, and serial/CAN configuration. Continuous
-servo communication must run in an independent **C++ process**, so a Python
-interpreter pause cannot interrupt the communication loop. A C++ extension called
-synchronously from Python alone does not meet this requirement. Python can handle
-setup, UI, and cloud messages; send bounded, timestamped commands to the C++
-process and receive feedback over IPC. The native process must detect stale
-commands and apply the arm’s defined safe behavior. Verify communication timing
-under Python load; using C++ alone does not guarantee real-time scheduling.
-
-Start from the current [YAM adapter](src/blupe_controller/runtime/YAM_control/i2rt_bimanual_adapter.py)
-and [motor worker](src/blupe_controller/runtime/YAM_control/motor_worker.py), but
-replace their hardware-specific implementation. The alpha’s worker is a separate
-Python process; it does **not yet meet this C++ requirement** for the new adapter.
-For SO101, map its five arm joints and separate gripper to the Feetech interface.
-Keep the local calibration ID separate from the cloud robot ID.
+**A. Joint control.** Use the arm's existing robot implementation and configuration
+where possible. SO101 uses LeRobot's Python `SOFollower` and `SO101FollowerConfig`;
+LeRobot handles Feetech communication and calibration. BluPe maps five joint angles
+in degrees plus a 0–1 gripper value to LeRobot actions. No custom C++ driver is
+required for this arm. Use independent native communication where the hardware
+requires uninterrupted host commands, as with the YAM MIT-mode path.
 
 **B. Safety precautions.** Implement calibrated position, velocity, and per-command
 movement limits; validate all targets before execution. Define safe enable,
-home/rest, hold, stop, and torque-off behavior for the actual arm. Enforce limits
-and command/connection watchdogs in the native controller so they still work if
-Python or the cloud stops responding. Provide an independent stop path and test
+home/rest, hold, stop, and torque-off behavior for the actual arm. For controllers with independent native workers, enforce watchdogs there.
+SO101 software checks run in Python and stop running if Python stalls; with torque
+enabled, its servos may continue to the last target and hold it. Provide an independent stop path and test
 fault handling. Replace the YAM two-arm/12-joint assumptions in
 [hardware_safety.py](src/blupe_controller/runtime/YAM_control/hardware_safety.py);
 do not reuse YAM home poses or CAN shutdown commands on another robot.
 
 **C. Cameras.** Configure camera names, devices, resolution, and frame rate for
 your setup. Keep camera capture/encoding outside the motor communication process.
-Replace the alpha’s mandatory left/top/right camera mapping with your arm’s layout.
+The SO101 setup accepts any named camera roles; YAM retains left/top/right.
 Verify camera identity and capture timestamps; a repeated old image is not a live
 stream.
 
@@ -96,16 +109,16 @@ where needed, reconnect behavior, and visible stream-loss reporting.
 
 Configure dependencies and startup for the controller computer in
 [cli.py](src/blupe_controller/cli.py), [pyproject.toml](pyproject.toml), and
-[install.py](install.py). The alpha is Linux/YAM-only and generates systemd units;
-a Mac-connected arm also needs a macOS installation/startup path.
+[install.py](install.py). The release installer is Linux/YAM-only and generates systemd units.
+SO101 uses the source installation and foreground startup described below.
 
 Validate with simulated hardware, then verify calibration and feedback before
 physical motion tests. Test target execution, safety limits, Python stalls,
 connection loss, stop behavior, and camera streaming before enabling queued runs.
-The cloud API already supports per-robot queues; SO101 and other non-YAM controller
-profiles are not implemented in this release.
+The cloud API already supports per-robot queues. The SO101 hardware profile and cloud bridge use five joint targets and an empty
+right-arm array, with explicit operator queue authorization.
 
-## Download and install
+## Download and install YAM
 
 Download the `.tar.gz` bundle from [Releases](https://github.com/andlyu/blupe-playground-robot-controller/releases).
 Extract it, then on Linux with Python 3.10–3.12 and venv/pip available:
@@ -141,8 +154,7 @@ The three camera numbers above are examples in left/top/right order; use your
 actual devices. Configuration is stored privately at
 `~/.config/blupe-controller/config.json`. YAM has no additional guided settings
 in this release; it uses the extracted bimanual profile (`can0` and `can1`).
-SO101 calibration and custom driver setup are future extensions and are rejected,
-not presented as working options.
+For SO101, use the separate [source setup instructions](docs/SO101.md).
 
 After diagnostics pass, run in separate terminals:
 

@@ -58,3 +58,22 @@ class TunnelTests(unittest.TestCase):
             key.chmod(0o644)
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit), patch('subprocess.call',side_effect=AssertionError('Started')):
                 main(['connect-operator','--user','robot-isaac','--remote-port','28096','--identity',str(key),'--known-hosts',str(hosts)])
+
+class BackendTests(unittest.TestCase):
+    def test_dispatch_is_lazy_and_uses_selected_backend(self):
+        from blupe_controller.backends import run
+        for name in ('yam','so101'):
+            with patch('blupe_controller.backends.import_module') as load:
+                run({'hardware':name})
+                load.assert_called_once_with('blupe_controller.backends.'+name)
+                load.return_value.run.assert_called_once_with({'hardware':name})
+        with self.assertRaises(ValueError): run({'hardware':'unknown'})
+
+    def test_shared_template_matches_yam_and_so101_binding(self):
+        import ast
+        from blupe_controller import operator_page
+        page=operator_page.PAGE
+        self.assertIn('Run via Session API',page)
+        self.assertIn('s.at_home!==true',page)
+        self.assertNotIn('function near(s,p)',page)
+        self.assertNotIn('__import__',page)

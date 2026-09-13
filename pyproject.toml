@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blupe-playground-robot-controller"
-version = "0.1.0a2"
-description = "Local YAM controller for BluPe Playground"
+version = "0.2.0.dev0"
+description = "Local robot controller for BluPe Playground"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 
@@ -13,6 +13,7 @@ requires-python = ">=3.10,<3.13"
 blupe-controller = "blupe_controller.cli:main"
 
 [project.optional-dependencies]
+so101 = ["lerobot==0.5.1", "opencv-python>=4.10,<5", "websockets>=14,<17"]
 yam = ["numpy==2.2.6", "mujoco==3.11.0", "ruckig==0.15.3", "opencv-python-headless==5.0.0.93", "websockets==16.1.1", "cryptography==48.0.0"]
 
 [tool.setuptools.packages.find]
@@ -20,4 +21,4 @@ where = ["src"]
 include = ["blupe_controller*"]
 
 [tool.setuptools.package-data]
-blupe_controller = ["runtime/assets/**/*", "runtime/config/*.json", "runtime/deploy/operator/*.json"]
+blupe_controller = ["templates/*.html","runtime/assets/**/*", "runtime/config/*.json", "runtime/deploy/operator/*.json"]

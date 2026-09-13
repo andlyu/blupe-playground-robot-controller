@@ -125,6 +125,7 @@ def parse_joint_trajectory(
     max_waypoints: int = MAX_WAYPOINTS,
     required_cadence_hz: float = DEFAULT_CADENCE_HZ,
     enforce_freshness: bool = True,
+    joint_counts: tuple[int, int] = (6, 6),
 ) -> JointTrajectory:
     """Parse one exact v1 payload; no target is returned until every point is valid."""
     if not isinstance(payload, Mapping):
@@ -185,8 +186,8 @@ def parse_joint_trajectory(
         waypoints.append(
             TrajectoryWaypoint(
                 step_id=step_id,
-                left_joints_deg=_joint_array(raw.get("left_joints_deg"), "left", index),
-                right_joints_deg=_joint_array(raw.get("right_joints_deg"), "right", index),
+                left_joints_deg=_joint_array(raw.get("left_joints_deg"), "left", index, joint_counts[0]),
+                right_joints_deg=_joint_array(raw.get("right_joints_deg"), "right", index, joint_counts[1]),
                 left_gripper=_optional_gripper(raw, "left_gripper", index),
                 right_gripper=_optional_gripper(raw, "right_gripper", index),
             )
@@ -232,8 +233,8 @@ def resolve_gripper_waypoints(
     return tuple(resolved)
 
 
-def _joint_array(value: Any, arm: str, waypoint: int) -> tuple[float, ...]:
-    if not isinstance(value, list) or len(value) != JOINTS_PER_ARM:
+def _joint_array(value: Any, arm: str, waypoint: int, count: int = JOINTS_PER_ARM) -> tuple[float, ...]:
+    if not isinstance(value, list) or len(value) != count:
         raise TrajectorySchemaError(f"invalid_{arm}_joints", waypoint=waypoint)
     try:
         return tuple(_number(item, f"invalid_{arm}_joints") for item in value)
