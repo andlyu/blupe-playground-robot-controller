@@ -16,8 +16,8 @@ DEFAULT_CONFIG = Path.home() / '.config/blupe-controller/config.json'
 
 
 def validate(config):
-    if config.get('version') != 1 or config.get('hardware') != 'yam':
-        raise ValueError('This release supports the YAM profile only; SO101 calibration is not implemented yet.')
+    if config.get('version') != 1 or config.get('hardware') not in ('yam', 'so101'):
+        raise ValueError('Supported profiles: yam, so101.')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', config.get('robot_id', '')):
         raise ValueError('Invalid robot ID')
     origin = urlsplit(config.get('api', ''))
@@ -25,6 +25,9 @@ def validate(config):
         raise ValueError('Use an HTTPS API origin with no credentials, path or query')
     if not Path(config.get('token_file', '')).is_absolute():
         raise ValueError('Use an absolute credential-file path')
+    if config['hardware'] == 'so101':
+        from .so101 import validate_profile
+        return validate_profile(config)
     cameras = config.get('cameras', {})
     if set(cameras) != {'left', 'top', 'right'} or any(type(v) is not int or v < 0 for v in cameras.values()) or len(set(cameras.values())) != 3:
         raise ValueError('YAM requires three distinct camera device numbers: left, top, right')
@@ -36,9 +39,22 @@ def load(path):
 
 
 def setup(args):
+    if args.hardware == 'so101':
+        if not args.serial_port or not args.calibration or not args.camera:
+            raise ValueError('SO101 requires --serial-port, --calibration, and --camera ROLE=INDEX')
+        try:
+            cameras = dict((k, int(v)) for k,v in (value.split('=', 1) for value in args.camera))
+        except ValueError:
+            raise ValueError('Use --camera ROLE=INDEX')
+        settings = {'serial_port': args.serial_port, 'calibration_file': str(args.calibration.resolve()), 'camera_port': args.camera_port, 'operator_port':args.operator_port, 'operator_hostname':args.operator_hostname}
+    else:
+        if not args.cameras:
+            raise ValueError('YAM requires --cameras LEFT TOP RIGHT')
+        cameras = dict(zip(('left', 'top', 'right'), args.cameras))
+        settings = {}
     config = validate({'version': 1, 'hardware': args.hardware, 'robot_id': args.robot_id,
         'api': args.api.rstrip('/'), 'token_file': str(args.token_file.resolve()),
-        'cameras': dict(zip(('left', 'top', 'right'), args.cameras)), 'settings': {}})
+        'cameras': cameras, 'settings': settings})
     args.config.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Never silently overwrite a configured or running controller.
     fd = os.open(args.config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -49,6 +65,15 @@ def setup(args):
 
 
 def doctor(config):
+    if config['hardware'] == 'so101':
+        import shutil
+        checks = {'serial_device': Path(config['settings']['serial_port']).exists(),
+                  'C++ compiler': bool(shutil.which('clang++') or shutil.which('g++')),
+                  'opencv': importlib.util.find_spec('cv2') is not None}
+        for name, ok in checks.items():
+            print(f'{"OK" if ok else "MISSING"} {name}')
+        print('No devices opened. Use probe for read-only servo feedback; cameras for capture.')
+        return all(checks.values())
     checks = {'linux': sys.platform == 'linux', 'architecture': platform.machine() in {'aarch64','arm64','x86_64'},
         'bundled_model': (RUNTIME / 'assets/yam_bimanual/scene.xml').is_file(),
         'bundled_mesh': (RUNTIME / 'assets/yam/assets/base.stl').is_file()}
@@ -71,6 +96,14 @@ def runtime_path():
 
 
 def run(config):
+    if config['hardware'] == 'so101':
+        from .so101 import SO101Driver
+        from .operator import serve
+        driver = SO101Driver(config).connect()
+        try:
+            return serve(driver, config)
+        finally:
+            driver.close()
     if sys.platform != 'linux':
         raise ValueError('YAM hardware control requires Linux')
     if not doctor(config):
@@ -97,16 +130,16 @@ def run(config):
 def cameras(config):
     runtime_path()
     from YAM_control import camera_relay
-    sys.argv = ['blupe-controller', '--devices', *map(str, config['cameras'].values()), '--host', '127.0.0.1', '--port', '8089']
+    sys.argv = ['blupe-controller', '--devices', *map(str, config['cameras'].values()), '--host', '127.0.0.1', '--port', str(config.get('settings', {}).get('camera_port', 8089))]
     camera_relay.main()
 
 
 def publish(config):
     runtime_path()
     from scripts.publish_yam_cameras import publish as upload
-    args = argparse.Namespace(camera_origin='http://127.0.0.1:8089', api=config['api'],
+    args = argparse.Namespace(camera_origin=f'http://127.0.0.1:{config.get("settings", {}).get("camera_port", 8089)}', api=config['api'],
         jetson_id=config['robot_id'], token_file=config['token_file'])
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(config['cameras'])) as pool:
         futures = [pool.submit(upload, args, role, device) for role, device in config['cameras'].items()]
         for future in futures:
             future.result()
@@ -118,7 +151,7 @@ def connect_operator(args):
         raise ValueError('Invalid tunnel host')
     if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]{0,63}', args.user):
         raise ValueError('Invalid tunnel account')
-    if not 1024 <= args.remote_port <= 65535:
+    if not 1024 <= args.remote_port <= 65535 or not 1024 <= args.local_port <= 65535:
         raise ValueError('Invalid assigned operator port')
     for path in (args.identity, args.known_hosts):
         if not path.is_file(): raise ValueError('Tunnel key and administrator-verified known-hosts file are required')
@@ -128,7 +161,7 @@ def connect_operator(args):
         '-o', 'StrictHostKeyChecking=yes', '-o', 'UserKnownHostsFile=' + str(args.known_hosts.resolve()),
         '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
         '-o', 'ConnectTimeout=10', '-i', str(args.identity.resolve()),
-        '-R', f'127.0.0.1:{args.remote_port}:127.0.0.1:8096', args.user + '@' + args.host])
+        '-R', f'127.0.0.1:{args.remote_port}:127.0.0.1:{args.local_port}', args.user + '@' + args.host])
 
 
 def main(argv=None):
@@ -140,15 +173,23 @@ def main(argv=None):
     s.add_argument('--api', required=True)
     s.add_argument('--token-file', type=Path, required=True)
     s.add_argument('--hardware', default='yam')
-    s.add_argument('--cameras', type=int, nargs=3, required=True, metavar=('LEFT','TOP','RIGHT'))
+    s.add_argument('--cameras', type=int, nargs=3, metavar=('LEFT','TOP','RIGHT'))
+    s.add_argument('--serial-port')
+    s.add_argument('--calibration', type=Path)
+    s.add_argument('--camera', action='append', help='SO101 camera ROLE=INDEX; repeat for multiple cameras')
+    s.add_argument('--camera-port', type=int, default=8089)
+    s.add_argument('--operator-port', type=int, default=8096)
+    s.add_argument('--operator-hostname', default='localhost', help='Allowed hosted operator hostname when tunneled')
+    commands.add_parser('probe', help='Read SO101 positions without enabling torque or writing registers')
     commands.add_parser('doctor', help='Check dependencies and device paths without opening hardware')
-    commands.add_parser('run', help='Start local YAM console; operator must explicitly launch arms')
+    commands.add_parser('run', help='Start hardware console; motion requires explicit enable')
     commands.add_parser('cameras', help='Capture cameras on loopback port 8089')
     commands.add_parser('publish-cameras', help='Upload fresh snapshots through the existing robot API')
     tunnel = commands.add_parser('connect-operator', help='Connect the local operator console through an administrator-provisioned SSH tunnel')
     tunnel.add_argument('--host', default='100.61.149.60')
     tunnel.add_argument('--user', required=True)
     tunnel.add_argument('--remote-port', type=int, required=True)
+    tunnel.add_argument('--local-port', type=int, default=8096)
     tunnel.add_argument('--identity', type=Path, required=True)
     tunnel.add_argument('--known-hosts', type=Path, required=True)
     args = parser.parse_args(argv)
@@ -157,6 +198,10 @@ def main(argv=None):
         if args.command == 'setup':
             setup(args); return 0
         config = load(args.config)
+        if args.command == 'probe':
+            if config['hardware'] != 'so101': raise ValueError('probe currently supports SO101 only')
+            from .so101 import console
+            return console(config, probe=True)
         if args.command == 'doctor': return 0 if doctor(config) else 1
         return {'run':run, 'cameras':cameras, 'publish-cameras':publish}[args.command](config)
     except (ValueError, OSError) as error:
