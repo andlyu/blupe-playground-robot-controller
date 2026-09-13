@@ -27,7 +27,8 @@ def validate(config):
         raise ValueError('Use an absolute credential-file path')
     if config['hardware'] == 'so101':
         from .so101 import validate_profile
-        return validate_profile(config)
+        from .lerobot_config import resolve
+        return validate_profile(resolve(config))
     cameras = config.get('cameras', {})
     if set(cameras) != {'left', 'top', 'right'} or any(type(v) is not int or v < 0 for v in cameras.values()) or len(set(cameras.values())) != 3:
         raise ValueError('YAM requires three distinct camera device numbers: left, top, right')
@@ -39,7 +40,13 @@ def load(path):
 
 
 def setup(args):
-    if args.hardware == 'so101':
+    if args.hardware == 'so101' and args.lerobot_config:
+        if args.serial_port or args.calibration or args.camera or args.cameras:
+            raise ValueError('Use the LeRobot file alone for hardware configuration')
+        cameras = {}
+        settings = {'lerobot_config_file':str(args.lerobot_config.resolve()), 'camera_port':args.camera_port,
+                    'operator_port':args.operator_port,'operator_hostname':args.operator_hostname}
+    elif args.hardware == 'so101':
         if not args.serial_port or not args.calibration or not args.camera:
             raise ValueError('SO101 requires --serial-port, --calibration, and --camera ROLE=INDEX')
         try:
@@ -55,6 +62,9 @@ def setup(args):
     config = validate({'version': 1, 'hardware': args.hardware, 'robot_id': args.robot_id,
         'api': args.api.rstrip('/'), 'token_file': str(args.token_file.resolve()),
         'cameras': cameras, 'settings': settings})
+    if settings.get('lerobot_config_file'):
+        config['settings'] = settings
+        config.pop('cameras', None)
     args.config.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Never silently overwrite a configured or running controller.
     fd = os.open(args.config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -66,9 +76,8 @@ def setup(args):
 
 def doctor(config):
     if config['hardware'] == 'so101':
-        import shutil
         checks = {'serial_device': Path(config['settings']['serial_port']).exists(),
-                  'C++ compiler': bool(shutil.which('clang++') or shutil.which('g++')),
+                  'lerobot': importlib.util.find_spec('lerobot') is not None,
                   'opencv': importlib.util.find_spec('cv2') is not None}
         for name, ok in checks.items():
             print(f'{"OK" if ok else "MISSING"} {name}')
@@ -131,6 +140,8 @@ def cameras(config):
     runtime_path()
     from YAM_control import camera_relay
     sys.argv = ['blupe-controller', '--devices', *map(str, config['cameras'].values()), '--host', '127.0.0.1', '--port', str(config.get('settings', {}).get('camera_port', 8089))]
+    if config.get('settings', {}).get('camera_settings'):
+        sys.argv += ['--device-settings', json.dumps(config['settings']['camera_settings'])]
     camera_relay.main()
 
 
@@ -174,6 +185,7 @@ def main(argv=None):
     s.add_argument('--token-file', type=Path, required=True)
     s.add_argument('--hardware', default='yam')
     s.add_argument('--cameras', type=int, nargs=3, metavar=('LEFT','TOP','RIGHT'))
+    s.add_argument('--lerobot-config', type=Path, help='Reference a LeRobot SO101 robot JSON configuration')
     s.add_argument('--serial-port')
     s.add_argument('--calibration', type=Path)
     s.add_argument('--camera', action='append', help='SO101 camera ROLE=INDEX; repeat for multiple cameras')

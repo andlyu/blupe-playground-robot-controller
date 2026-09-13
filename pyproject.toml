@@ -13,7 +13,7 @@ requires-python = ">=3.10,<3.13"
 blupe-controller = "blupe_controller.cli:main"
 
 [project.optional-dependencies]
-so101 = ["opencv-python>=4.10,<5", "websockets>=14,<17"]
+so101 = ["lerobot==0.5.1", "opencv-python>=4.10,<5", "websockets>=14,<17"]
 yam = ["numpy==2.2.6", "mujoco==3.11.0", "ruckig==0.15.3", "opencv-python-headless==5.0.0.93", "websockets==16.1.1", "cryptography==48.0.0"]
 
 [tool.setuptools.packages.find]
@@ -21,4 +21,4 @@ where = ["src"]
 include = ["blupe_controller*"]
 
 [tool.setuptools.package-data]
-blupe_controller = ["native/*.cpp", "runtime/assets/**/*", "runtime/config/*.json", "runtime/deploy/operator/*.json"]
+blupe_controller = ["runtime/assets/**/*", "runtime/config/*.json", "runtime/deploy/operator/*.json"]

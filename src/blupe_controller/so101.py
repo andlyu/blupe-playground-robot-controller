@@ -1,14 +1,12 @@
-"""SO101 profile and subprocess driver. Importing this module never opens hardware."""
-import hashlib
+"""Thin BluPe adapter for LeRobot's Python SO101 implementation.
+
+LeRobot owns protocol handling, normalization and relative-target clipping.
+No native worker, interpolation thread or independent watchdog is used.
+"""
 import json
 import math
-import os
 from pathlib import Path
-import shutil
-import subprocess
-import tempfile
 import threading
-import time
 
 NAMES = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper')
 
@@ -51,192 +49,142 @@ def validate_profile(config):
     return config
 
 
-def build():
-    source = Path(__file__).with_name('native') / 'so101.cpp'
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
-    cache = Path.home() / '.cache/blupe-controller/native'
-    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
-    binary = cache / ('so101-' + digest)
-    if not binary.exists():
-        compiler = shutil.which('clang++') or shutil.which('g++')
-        if not compiler:
-            raise ValueError('Install a C++17 compiler (on macOS: xcode-select --install)')
-        with tempfile.TemporaryDirectory(dir=cache) as temp:
-            built = Path(temp) / 'so101'
-            subprocess.run([compiler, '-std=c++17', '-O2', '-Wall', '-Wextra', '-pthread', str(source), '-o', str(built)], check=True)
-            built.replace(binary)
-    return binary
+
+def make_robot(config):
+    from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig
+    from lerobot.robots.so_follower.so_follower import SOFollower
+    settings = config['settings']
+    calibration_path = Path(settings['calibration_file'])
+    # Camera capture runs in the existing relay, using the same source config.
+    robot_config = SO101FollowerConfig(
+        port=settings['serial_port'], id=calibration_path.stem,
+        calibration_dir=calibration_path.parent, use_degrees=True, cameras={},
+        max_relative_target=settings.get('max_relative_target'),
+        disable_torque_on_disconnect=settings.get('disable_torque_on_disconnect', False))
+    return SOFollower(robot_config)
 
 
 class SO101Driver:
-    """Native ownership of serial I/O; angles in degrees, gripper in [0, 1].
-
-    connect() is read-only. enable() is explicit. hold()/close() retain the last
-    bounded target; they do not release torque or certify an emergency stop.
-    """
     joint_names = NAMES[:5]
 
     def __init__(self, config):
-        validate_profile(config)
-        self.config = config
-        self.cal = calibration(config['settings']['calibration_file'])
-        self.proc = None
-        self.condition = threading.Condition()
-        self.write_lock = threading.Lock()
-        self.latest = None
-        self.received = 0
-        self.seq = 0
-        self.done = threading.Event()
+        from .lerobot_config import resolve
+        self.config = validate_profile(resolve(config))
+        self.cal = calibration(self.config['settings']['calibration_file'])
+        self.robot = None
+        self.mode = 'readonly'
+        self.error = ''
+        self.enabled_once = False
+        self.lock = threading.RLock()
 
     def connect(self):
-        if self.proc:
-            raise ValueError('Driver already connected')
-        binary = build()
-        self.temp = tempfile.TemporaryDirectory(prefix='blupe-so101-')
-        profile = Path(self.temp.name) / 'profile'
-        profile.write_text('\n'.join(' '.join(str(self.cal[n][k]) for k in
-            ('id', 'range_min', 'range_max', 'homing_offset')) for n in NAMES))
-        self.proc = subprocess.Popen([str(binary), self.config['settings']['serial_port'], str(profile)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-        os.set_blocking(self.proc.stdin.fileno(), False)
-        threading.Thread(target=self._read, daemon=True).start()
+        if self.robot is not None:
+            raise ValueError('Already connected')
+        self.robot = make_robot(self.config)
         try:
-            initial = self.state(wait=3)
-            if initial['mode'] == 'fault':
-                raise ValueError(initial['error'])
+            # SOFollower.connect() also configures registers and toggles torque.
+            # Use its bus's read-only connection for an already configured arm.
+            self.robot.bus.connect()
+            if not self.robot.is_calibrated:
+                raise ValueError('LeRobot calibration does not match the servos')
+            for name in NAMES:
+                if self.robot.bus.read('Operating_Mode', name, normalize=False) != 0:
+                    raise ValueError('Servo is not in position mode')
+            self.state()
+            return self
         except Exception:
             self.close()
             raise
-        threading.Thread(target=self._heartbeat, daemon=True).start()
-        return self
-
-    def _read(self):
-        for line in self.proc.stdout:
-            try:
-                state = json.loads(line)
-            except ValueError:
-                continue
-            with self.condition:
-                self.latest = state
-                self.received = time.monotonic()
-                self.condition.notify_all()
-        with self.condition:
-            self.condition.notify_all()
-
-    def _heartbeat(self):
-        while not self.done.wait(0.1):
-            try:
-                self._send('ping', wait=False)
-            except (OSError, ValueError):
-                return
 
     def state(self, wait=0):
-        with self.condition:
-            self.condition.wait_for(lambda: self.latest is not None or self.proc.poll() is not None, timeout=wait)
-            if self.proc.poll() is not None:
-                raise ValueError('Native driver exited: ' + self.proc.stderr.read().strip())
-            if self.latest is None or time.monotonic() - self.received > 0.5:
-                raise ValueError('No fresh native feedback')
-            result = dict(self.latest)
-        raw = result['raw']
-        result['joint_names'] = list(self.joint_names)
-        result['joints_deg'] = [(raw[i] - (self.cal[n]['range_min'] + self.cal[n]['range_max']) / 2) * 360 / 4095
-                                for i, n in enumerate(NAMES[:5])]
-        g = self.cal['gripper']
-        fraction = (raw[5] - g['range_min']) / (g['range_max'] - g['range_min'])
-        result['gripper'] = 1 - fraction if g['drive_mode'] else fraction
-        return result
+        with self.lock:
+            if self.robot is None:
+                raise ValueError('Not connected')
+            try:
+                observation = self.robot.get_observation()
+                joints = [float(observation[name+'.pos']) for name in self.joint_names]
+                gripper = float(observation['gripper.pos']) / 100
+                self._validate_target(joints, gripper)
+            except Exception as error:
+                self.mode, self.error = 'fault', str(error)
+                raise
+            return {'mode':self.mode, 'error':self.error, 'joint_names':list(self.joint_names),
+                    'joints_deg':joints, 'gripper':gripper}
 
-    def _send(self, text, wait=True):
-        with self.write_lock:
-            if self.proc is None or self.proc.poll() is not None:
-                raise ValueError('Native driver is not running')
-            self.seq += 1
-            seq = self.seq
-            message = f'{seq} {int(time.time() * 1000) + 500} {text}\n'.encode()
-            if len(message) > 512 or os.write(self.proc.stdin.fileno(), message) != len(message):
-                raise ValueError('Native command pipe unavailable')
-        if wait:
-            with self.condition:
-                if not self.condition.wait_for(lambda: self.latest and self.latest['seq'] >= seq, timeout=1):
-                    raise ValueError('Native command timed out')
-            state = self.state()
-            if state['mode'] == 'fault':
-                raise ValueError(state['error'])
-            return state
-
-    def enable(self):
-        return self._send('enable')
-
-    def hold(self):
-        return self._send('hold')
-
-    def move(self, joints_deg, gripper):
-        if len(joints_deg) != 5:
+    def _validate_target(self, joints_deg, gripper):
+        if not isinstance(joints_deg, (list, tuple)) or len(joints_deg) != 5:
             raise ValueError('SO101 requires five joint angles')
-        values = [*joints_deg, gripper]
-        if any(type(v) not in (int, float) or not math.isfinite(v) for v in values):
+        if any(type(v) not in (int, float) or not math.isfinite(v) for v in [*joints_deg, gripper]):
             raise ValueError('Targets must be finite numbers')
         if not 0 <= gripper <= 1:
             raise ValueError('Gripper must be between zero and one')
-        raw = []
-        for angle, name in zip(joints_deg, NAMES[:5]):
+        for angle, name in zip(joints_deg, self.joint_names):
             c = self.cal[name]
-            value = angle * 4095 / 360 + (c['range_min'] + c['range_max']) / 2
-            if not c['range_min'] <= value <= c['range_max']:
+            raw = angle * 4095 / 360 + (c['range_min'] + c['range_max']) / 2
+            if not c['range_min'] <= raw <= c['range_max']:
                 raise ValueError(f'{name}: target outside calibrated limits')
-            raw.append(int(value))
-        c = self.cal['gripper']
-        fraction = 1 - gripper if c['drive_mode'] else gripper
-        raw.append(int(c['range_min'] + fraction * (c['range_max'] - c['range_min'])))
-        return self._send('target ' + ' '.join(map(str, raw)))
+
+    @staticmethod
+    def _action(joints, gripper):
+        return {**{name+'.pos':v for name,v in zip(NAMES[:5], joints)}, 'gripper.pos':gripper*100}
+
+    def enable(self):
+        with self.lock:
+            if self.mode == 'fault':
+                raise ValueError('Restart after resolving the fault')
+            state = self.state()
+            # Preload the measured pose before enabling torque.
+            self.robot.bus.sync_write('Goal_Position', {
+                key.removesuffix('.pos'):value for key,value in self._action(state['joints_deg'],state['gripper']).items()})
+            self.enabled_once = True
+            try:
+                self.robot.bus.enable_torque()
+            except Exception as error:
+                self.mode, self.error = 'fault', str(error)
+                raise
+            self.mode = 'active'
+            return {**state, 'mode':self.mode}
+
+    def move(self, joints_deg, gripper):
+        with self.lock:
+            self._validate_target(joints_deg, gripper)
+            if self.mode != 'active':
+                raise ValueError('Enable before moving')
+            try:
+                sent = self.robot.send_action(self._action(joints_deg, gripper))
+                result = self.state()
+                # LeRobot may clip via max_relative_target: report actual sent values.
+                result['sent_action'] = sent
+                return result
+            except Exception as error:
+                self.mode, self.error = 'fault', str(error)
+                raise
+
+    def hold(self):
+        with self.lock:
+            state = self.state()
+            if self.enabled_once:
+                self.robot.bus.sync_write('Goal_Position', {
+                    key.removesuffix('.pos'):value for key,value in self._action(state['joints_deg'],state['gripper']).items()})
+            if self.mode != 'fault':
+                self.mode = 'hold' if self.enabled_once else 'readonly'
+            return {**state, 'mode':self.mode}
 
     def close(self):
-        self.done.set()
-        if self.proc:
-            try:
-                self._send('close', wait=False)
-                self.proc.wait(timeout=1)
-            except (OSError, ValueError, subprocess.TimeoutExpired):
-                self.proc.terminate()
+        with self.lock:
+            if self.robot is not None:
                 try:
-                    self.proc.wait(timeout=1)
-                except subprocess.TimeoutExpired:
-                    self.proc.kill()
-                    self.proc.wait()
-            for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
-                stream.close()
-            self.temp.cleanup()
+                    if self.robot.bus.is_connected:
+                        self.robot.bus.disconnect(disable_torque=self.enabled_once and
+                            self.config['settings'].get('disable_torque_on_disconnect',False))
+                finally:
+                    self.robot = None
 
 
 def console(config, probe=False):
     driver = SO101Driver(config).connect()
     try:
         print(json.dumps(driver.state(), indent=2))
-        if probe:
-            return 0
-        print('Read-only. Commands: state, enable, move <five degrees> <gripper 0..1>, hold, quit.')
-        while True:
-            try:
-                parts = input('so101> ').split()
-                if not parts:
-                    continue
-                if parts == ['quit']:
-                    break
-                if parts == ['state']:
-                    result = driver.state()
-                elif parts == ['enable']:
-                    result = driver.enable()
-                elif parts == ['hold']:
-                    result = driver.hold()
-                elif parts[0] == 'move' and len(parts) == 7:
-                    result = driver.move(list(map(float, parts[1:6])), float(parts[6]))
-                else:
-                    raise ValueError('Unknown command')
-                print(json.dumps(result))
-            except ValueError as error:
-                print(error)
-    except (EOFError, KeyboardInterrupt):
-        pass
+        return 0
     finally:
         driver.close()

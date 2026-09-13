@@ -260,14 +260,24 @@ def main():
     ap.add_argument("--stale-timeout-s", type=float, default=2.0)
     ap.add_argument("--reopen-after-failures", type=int, default=5)
     ap.add_argument("--reopen-delay-s", type=float, default=1.0)
+    ap.add_argument("--device-settings", default="{}", help="Per-device JSON width/height/fps settings")
     args = ap.parse_args()
+    device_settings = json.loads(args.device_settings)
+    if not isinstance(device_settings, dict) or set(device_settings) - set(map(str, args.devices)):
+        ap.error("Invalid per-device camera settings")
+    for settings in device_settings.values():
+        if not isinstance(settings, dict) or set(settings) != {"width", "height", "fps"}:
+            ap.error("Provide width, height and fps for each configured device")
+        for key, high in (("width",8192),("height",8192),("fps",120)):
+            if type(settings[key]) is not int or not 1 <= settings[key] <= high:
+                ap.error("Invalid camera dimension or frame rate")
 
     for d in args.devices:
         CAMS[str(d)] = Cam(
             d,
-            args.width,
-            args.height,
-            args.fps,
+            device_settings.get(str(d), {}).get("width", args.width),
+            device_settings.get(str(d), {}).get("height", args.height),
+            device_settings.get(str(d), {}).get("fps", args.fps),
             args.quality,
             args.stale_timeout_s,
             args.reopen_after_failures,

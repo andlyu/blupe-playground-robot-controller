@@ -1,12 +1,14 @@
-# SO101 protocol references
+# LeRobot SO101 references
 
-Captured from this Mac’s installed packages on 2026-09-13; LeRobot 0.5.1 (Apache-2.0) and feetech-servo-sdk 1.0.0 (Unlicense); original copyright notices retained. LeRobot source: https://github.com/huggingface/lerobot. Feetech SDK: https://github.com/Adam-Software/FEETECH-Servo-Python-SDK. These snapshots are reference material, not runtime dependencies.
+Source: https://github.com/huggingface/lerobot, installed version 0.5.1 (Apache-2.0),
+captured 2026-09-13. Original copyright notices retained.
 
-- Register addresses/model numbers: `tables.py` (STS3215 model 777, protocol endianness 0).
-- Packet framing/checksum/read/write: `packet.py`, `constants.py`.
-- Calibration and units: `normalization.py`, `_normalize` / `_unnormalize`.
-- Motor IDs, gripper setup and connect side effects: `follower.py`.
+- `robot_config.py`, `follower_config.py`: RobotConfig and SO101FollowerConfig fields.
+- `camera_config.py`: OpenCVCameraConfig fields.
+- `follower.py`: standard robot, action and observation methods, connect side effects.
+- `normalization.py`, `tables.py`: degree/gripper normalization and calibration reference.
 
-The native driver reads calibrated positions from register 56. Homing offsets are already applied by the servo; compare register 31 with the calibration instead of adding offsets again. Body joints use degrees about the calibrated midpoint, with 4095 ticks per revolution; the gripper uses a normalized fraction of its calibrated range. `SOFollower.connect()` configures motors and toggles torque, so it is unsuitable for a read-only probe.
-
-Only the STS3215 protocol is implemented. No homing/calibration writes occur. Native limits and a heartbeat timeout remain active if Python stalls. Hardware force limits and emergency power removal still require commissioning.
+BluPe uses LeRobot's Python implementation. Servo protocol code is not duplicated.
+A read-only probe uses `robot.bus.connect()` because `robot.connect()` also changes
+motor configuration and torque. Calibration must already match. Camera capture
+runs in the existing relay with settings derived from the same robot config.

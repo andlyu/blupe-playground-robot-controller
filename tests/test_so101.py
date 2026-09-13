@@ -1,204 +1,95 @@
 import json
-import os
 from pathlib import Path
-import pty
-import select
-import subprocess
 import tempfile
-import threading
-import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from blupe_controller.so101 import NAMES, SO101Driver, calibration
-
-
-class ServoEmulator:
-    def __init__(self):
-        self.master, self.slave = pty.openpty()
-        self.port = os.ttyname(self.slave)
-        self.writes = []
-        self.reads = 0
-        self.position = [2000] * 6
-        self.bad_offset = False
-        self.bad_checksum = False
-        self.done = threading.Event()
-        self.thread = threading.Thread(target=self.run, daemon=True)
-        self.thread.start()
-
-    def run(self):
-        pending = b''
-        while not self.done.is_set():
-            if not select.select([self.master], [], [], .05)[0]:
-                continue
-            try:
-                pending += os.read(self.master, 4096)
-            except OSError:
-                continue
-            while len(pending) >= 4 and len(pending) >= pending[3] + 4:
-                length = pending[3] + 4
-                packet, pending = pending[:length], pending[length:]
-                if packet[:2] != b'\xff\xff' or sum(packet[2:]) % 256 != 255:
-                    raise AssertionError('Invalid native packet')
-                ident, instruction = packet[2], packet[4]
-                if instruction == 2:
-                    self.reads += 1
-                    address, size = packet[5:7]
-                    value = {3:777, 31:1 if self.bad_offset else 0, 33:0, 56:self.position[ident-1]}[address]
-                    reply = [ident, size+2, 0, value & 255]
-                    if size == 2:
-                        reply.append(value >> 8)
-                    checksum = (~sum(reply)) & 255
-                    os.write(self.master, bytes([255,255,*reply,checksum ^ int(self.bad_checksum)]))
-                else:
-                    self.writes.append((time.monotonic(), packet))
-                    if packet[5] == 42:
-                        for start in range(7, len(packet)-1, 3):
-                            servo, lo, hi = packet[start:start+3]
-                            self.position[servo-1] = lo | hi << 8
-
-    def close(self):
-        self.done.set()
-        self.thread.join(1)
-        os.close(self.master)
-        os.close(self.slave)
+from blupe_controller.so101 import NAMES, SO101Driver
 
 
-class NativeTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.builddir = tempfile.TemporaryDirectory()
-        cls.binary = Path(cls.builddir.name) / 'driver'
-        source = Path(__file__).parents[1] / 'src/blupe_controller/native/so101.cpp'
-        subprocess.run(['clang++', '-std=c++17', '-DBLUPE_TEST_PTY', '-O2', '-Wall', '-Wextra', '-pthread', str(source), '-o', str(cls.binary)], check=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.builddir.cleanup()
-
+class LeRobotTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.path = Path(self.temp.name) / 'calibration.json'
-        self.path.write_text(json.dumps({name:dict(id=i+1, drive_mode=0, homing_offset=0, range_min=1000, range_max=3000) for i,name in enumerate(NAMES)}))
-        self.bus = ServoEmulator()
-        self.config = dict(settings=dict(serial_port=self.bus.port, calibration_file=str(self.path)), cameras={'front':0})
-        self.build_patch = patch('blupe_controller.so101.build', return_value=self.binary)
-        self.build_patch.start()
+        self.path = Path(self.temp.name)/'cal.json'
+        self.path.write_text(json.dumps({name:dict(id=i+1,drive_mode=0,homing_offset=0,range_min=1000,range_max=3000) for i,name in enumerate(NAMES)}))
+        self.config = {'settings':{'serial_port':'/dev/example','calibration_file':str(self.path)}, 'cameras':{'front':0}}
+        self.robot = Mock()
+        self.robot.is_calibrated = True
+        self.robot.bus.is_connected = True
+        self.robot.bus.read.return_value = 0
+        self.robot.get_observation.return_value = {**{name+'.pos':0 for name in NAMES[:5]},'gripper.pos':50}
+        self.robot.send_action.side_effect = lambda action: action
+        self.factory = patch('blupe_controller.so101.make_robot',return_value=self.robot)
+        self.factory.start()
         self.driver = SO101Driver(self.config)
 
     def tearDown(self):
         self.driver.close()
-        self.build_patch.stop()
-        self.bus.close()
+        self.factory.stop()
         self.temp.cleanup()
 
-    def test_readonly_no_writes_and_joint_units(self):
+    def test_probe_uses_lerobot_without_writes(self):
         self.driver.connect()
-        time.sleep(.15)
-        self.assertEqual(self.bus.writes, [])
-        self.assertGreater(self.bus.reads, 30)
-        state = self.driver.state()
-        self.assertEqual(state['joints_deg'], [0]*5)
-        self.assertEqual(state['gripper'], .5)
+        self.assertEqual(self.driver.state()['gripper'],.5)
+        self.robot.bus.sync_write.assert_not_called()
+        self.robot.bus.enable_torque.assert_not_called()
+        self.robot.connect.assert_not_called()
+        self.driver.close()
+        self.robot.bus.disconnect.assert_called_once_with(disable_torque=False)
 
-    def test_native_ramp_and_hold(self):
+    def test_move_requires_enable_and_maps_gripper(self):
+        self.driver.connect()
+        with self.assertRaises(ValueError): self.driver.move([1]*5,.6)
+        self.driver.enable()
+        self.robot.bus.enable_torque.assert_called_once()
+        result=self.driver.move([1,2,3,4,5],.6)
+        self.assertEqual(result['sent_action']['gripper.pos'],60)
+        self.assertEqual(result['sent_action']['wrist_roll.pos'],5)
+
+    def test_limits_and_nonfinite_targets_rejected(self):
         self.driver.connect()
         self.driver.enable()
-        self.driver.move([10]*5, .6)
-        time.sleep(.2)
-        current = self.driver.state()['raw'][0]
-        self.assertGreater(current, 2000)
-        self.assertLess(current, 2040)
+        for angles,gripper in [([1000]*5,.5),([0]*4,.5),([float('nan')]*5,.5),([0]*5,2)]:
+            with self.assertRaises(ValueError): self.driver.move(angles,gripper)
+        self.robot.send_action.assert_not_called()
+
+    def test_hold_uses_measured_pose(self):
+        self.driver.connect()
+        self.driver.enable()
+        self.driver.move([10]*5,.6)
         self.driver.hold()
-        time.sleep(.08)
-        held = self.bus.position[:]
-        time.sleep(.12)
-        self.assertEqual(self.bus.position, held)
+        self.assertEqual(self.robot.bus.sync_write.call_args.args[1]['gripper'],50)
+        with self.assertRaises(ValueError): self.driver.move([0]*5,.5)
 
-    def test_watchdog_runs_without_python_heartbeats(self):
+    def test_calibration_mismatch_never_enables(self):
+        self.robot.is_calibrated=False
+        with self.assertRaises(ValueError): self.driver.connect()
+        self.robot.bus.enable_torque.assert_not_called()
+
+    def test_disconnect_respects_robot_config_after_enable(self):
+        self.driver.config['settings']['disable_torque_on_disconnect']=True
         self.driver.connect()
         self.driver.enable()
-        self.driver.move([20]*5, .6)
-        self.driver.done.set()  # Stop IPC heartbeat; native loop keeps running.
-        time.sleep(.7)
-        self.assertEqual(self.driver.state()['mode'], 'hold')
-        self.assertEqual(self.driver.state()['error'], 'heartbeat_timeout')
-        held = self.bus.position[:]
-        reads = self.bus.reads
-        time.sleep(.15)
-        self.assertEqual(self.bus.position, held)
-        self.assertGreater(self.bus.reads, reads)
+        self.driver.close()
+        self.robot.bus.disconnect.assert_called_once_with(disable_torque=True)
 
-    def test_native_keeps_polling_when_python_process_is_suspended(self):
-        import signal
-        import sys
-        program = """
-import time
-from pathlib import Path
-import blupe_controller.so101 as module
-module.build = lambda: Path(BINARY)
-driver = module.SO101Driver(CONFIG).connect()
-try:
-    driver.enable()
-    driver.move([20]*5, .6)
-    print('ready', flush=True)
-    time.sleep(5)
-finally:
-    driver.close()
-""".replace('BINARY', repr(str(self.binary))).replace('CONFIG', repr(self.config))
-        parent = subprocess.Popen([sys.executable, '-c', program], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            self.assertTrue(select.select([parent.stdout], [], [], 3)[0])
-            self.assertEqual(parent.stdout.readline().strip(), 'ready')
-            os.kill(parent.pid, signal.SIGSTOP)
-            before = self.bus.reads
-            time.sleep(.7)
-            self.assertGreater(self.bus.reads, before + 30)
-            held = self.bus.position[:]
-            self.assertLess(held[0], 2080)
-            time.sleep(.15)
-            self.assertEqual(self.bus.position, held)
-        finally:
-            os.kill(parent.pid, signal.SIGCONT)
-            parent.terminate()
-            parent.wait(timeout=3)
-            parent.stdout.close()
-            parent.stderr.close()
-            time.sleep(.1)  # Native worker observes parent-pipe EOF and exits.
+    def test_config_reference_is_reread_and_not_duplicated(self):
+        from blupe_controller.cli import main, load
+        source=Path(self.temp.name)/'robot.json'
+        source.write_text(json.dumps({'type':'so101_follower','port':'/dev/first','id':'cal',
+            'calibration_dir':self.temp.name,'use_degrees':True,'max_relative_target':5,
+            'cameras':{'front':{'type':'opencv','index_or_path':0,'width':640,'height':480,'fps':30}}}))
+        output=Path(self.temp.name)/'controller.json'
+        main(['--config',str(output),'setup','--hardware','so101','--robot-id','cloud-id',
+            '--api','https://example.com','--token-file',str(Path(self.temp.name)/'credential'),
+            '--lerobot-config',str(source)])
+        saved=json.loads(output.read_text())
+        self.assertNotIn('cameras',saved)
+        self.assertNotIn('serial_port',saved['settings'])
+        self.assertEqual(load(output)['settings']['max_relative_target'],5)
+        data=json.loads(source.read_text());data['port']='/dev/second';source.write_text(json.dumps(data))
+        self.assertEqual(load(output)['settings']['serial_port'],'/dev/second')
 
-    def test_native_rejects_bypassed_limits(self):
-        self.driver.connect()
-        self.driver.enable()
-        with self.assertRaisesRegex(ValueError, 'target_outside_limits'):
-            self.driver._send('target 5000 2000 2000 2000 2000 2000')
-        self.assertEqual(self.bus.position, [2000]*6)
-        with self.assertRaises(ValueError):
-            self.driver.enable()
-
-    def test_calibration_mismatch_never_writes(self):
-        self.bus.bad_offset = True
-        with self.assertRaisesRegex(ValueError, 'calibration_mismatch'):
-            self.driver.connect()
-        self.assertEqual(self.bus.writes, [])
-
-    def test_bad_feedback_latches_fault(self):
-        self.driver.connect()
-        self.bus.bad_checksum = True
-        time.sleep(.1)
-        self.assertEqual(self.driver.state()['mode'], 'fault')
-        self.assertEqual(self.bus.writes, [])
-
-    def test_invalid_targets_rejected_before_ipc(self):
-        for angles, gripper in [([0]*4,.5),([float('nan')]*5,.5),([0]*5,2),([1000]*5,.5)]:
-            with self.assertRaises(ValueError):
-                self.driver.move(angles, gripper)
-
-    def test_duplicate_calibration_ids_rejected(self):
-        data = json.loads(self.path.read_text())
-        data['gripper']['id'] = 1
-        self.path.write_text(json.dumps(data))
-        with self.assertRaises(ValueError):
-            calibration(self.path)
 
 class OperatorTests(unittest.TestCase):
     def test_home_is_captured_not_assumed(self):

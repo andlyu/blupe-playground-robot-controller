@@ -21,12 +21,11 @@ those hardware-specific parts.
 **YAM:** the existing Linux/Jetson controller, cloud session bridge, and bimanual
 operator panel. The released `v0.1.0-alpha.2` bundle remains YAM-only.
 
-**SO101 developer integration (source checkout):** macOS/Linux serial driver in
-an independent C++ process, imported LeRobot calibration, a local operator panel,
-and named cameras with fresh JPEG publishing. It starts read-only. Native safety
-behavior is tested against an emulated servo bus; physical motion is not yet
-commissioned. SO101 cloud queue execution and hosted video routing are not wired
-into this new panel yet. See [SO101 setup](docs/SO101.md).
+**SO101 developer integration (source checkout):** LeRobot's Python SO101 robot
+and configuration, a local operator panel, and named camera capture/publishing.
+There is no C++ worker for SO101. Physical motion is not yet commissioned; cloud
+queue execution and hosted video routing are still separate work.
+See [SO101 setup](docs/SO101.md).
 
 Installation never starts motors or services.
 
@@ -37,30 +36,18 @@ a robot type in the dashboard does not implement it automatically.
 
 ### 1. Adapt the controller to the robot
 
-**A. Joint control through C++.** Implement your arm’s driver so it can read joint
-positions and move to requested joint targets. Define servo IDs, joint order,
-units, gripper conversion, calibration, and serial/CAN configuration. Continuous
-servo communication must run in an independent **C++ process**, so a Python
-interpreter pause cannot interrupt the communication loop. A C++ extension called
-synchronously from Python alone does not meet this requirement. Python can handle
-setup, UI, and cloud messages; send bounded, timestamped commands to the C++
-process and receive feedback over IPC. The native process must detect stale
-commands and apply the arm’s defined safe behavior. Verify communication timing
-under Python load; using C++ alone does not guarantee real-time scheduling.
-
-Start from the current [YAM adapter](src/blupe_controller/runtime/YAM_control/i2rt_bimanual_adapter.py)
-and [motor worker](src/blupe_controller/runtime/YAM_control/motor_worker.py), but
-replace their hardware-specific implementation. The alpha’s worker is a separate
-Python process; it does **not yet meet this C++ requirement** for the new adapter.
-The SO101 implementation now uses [a standalone C++ worker](src/blupe_controller/native/so101.cpp)
-and [a Python adapter](src/blupe_controller/so101.py). Its five joints use degrees;
-the gripper uses 0–1. Keep the local calibration ID separate from the cloud robot ID.
+**A. Joint control.** Use the arm's existing robot implementation and configuration
+where possible. SO101 uses LeRobot's Python `SOFollower` and `SO101FollowerConfig`;
+LeRobot handles Feetech communication and calibration. BluPe maps five joint angles
+in degrees plus a 0–1 gripper value to LeRobot actions. No custom C++ driver is
+required for this arm. Use independent native communication where the hardware
+requires uninterrupted host commands, as with the YAM MIT-mode path.
 
 **B. Safety precautions.** Implement calibrated position, velocity, and per-command
 movement limits; validate all targets before execution. Define safe enable,
-home/rest, hold, stop, and torque-off behavior for the actual arm. Enforce limits
-and command/connection watchdogs in the native controller so they still work if
-Python or the cloud stops responding. Provide an independent stop path and test
+home/rest, hold, stop, and torque-off behavior for the actual arm. For controllers with independent native workers, enforce watchdogs there.
+SO101 software checks run in Python and stop running if Python stalls; with torque
+enabled, its servos may continue to the last target and hold it. Provide an independent stop path and test
 fault handling. Replace the YAM two-arm/12-joint assumptions in
 [hardware_safety.py](src/blupe_controller/runtime/YAM_control/hardware_safety.py);
 do not reuse YAM home poses or CAN shutdown commands on another robot.
