@@ -1,7 +1,22 @@
 # BluPe Playground robot controller
 
-The local controller connects a robot and its cameras to BluPe Playground’s cloud
-API and operator dashboard.
+## What the controller does
+
+The controller is the software that runs on the computer connected to your robot,
+such as a Jetson, desktop, or laptop. It connects the physical arm and its cameras
+to BluPe Playground so people can request tasks and watch the robot perform them.
+
+It receives commands from the cloud API, moves the robot to requested joint
+positions, and sends back its current positions and execution status. It also
+captures and publishes camera images, enforces local safety limits and stop
+behavior, and provides controls for the robot’s operator.
+
+The cloud API manages requests and assigns each session to the correct robot.
+The controller handles the actual hardware: servo communication, calibration,
+motion execution, and cameras. Adapting it to another arm means implementing
+those hardware-specific parts.
+
+## Current implementation: YAM
 
 **The current implementation is for a bimanual YAM setup on Linux/Jetson.** It is
 a developer alpha, not a universal robot controller. Selecting another robot type
