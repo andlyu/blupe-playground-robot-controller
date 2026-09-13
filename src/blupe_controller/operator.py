@@ -14,6 +14,7 @@ PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>BluPe operator
 <style>body{font:16px system-ui;max-width:900px;margin:40px auto;padding:20px;background:#f5f6f8;color:#172036}button,input{font:inherit;padding:10px;margin:4px}img{max-width:420px}pre{white-space:pre-wrap}</style></head>
 <body><h1>BluPe robot operator</h1><p id="identity"></p><p>Starts read-only. Enable holds the current position. Hold stops target changes and retains torque.</p>
 <button onclick="action('enable')">Enable</button><button onclick="action('hold')">Hold</button>
+<button onclick="action('cloud_ready')">Accept next queued task</button><button onclick="action('cloud_pause')">Pause queue</button>
 <button onclick="action('capture_zero')">Capture zero</button><button onclick="action('zero')">Move zero</button>
 <button onclick="action('capture_home')">Capture home</button><button onclick="action('home')">Move home</button>
 <p>Joint targets in degrees, in the displayed joint order. Gripper: 0–1.</p>
@@ -35,17 +36,27 @@ class Operator:
         self.config = config
         self.lock = threading.Lock()
         self.poses = PoseStore(config)
+        self.cloud = None
         self.ticket = secrets.token_urlsafe(32)
 
     def state(self):
         return {**self.driver.state(), 'robot_id':self.config['robot_id'],
                 'cameras':list(self.config['cameras']), 'home_captured':'home' in self.poses.poses,
                 'zero_captured':'zero' in self.poses.poses, 'saved_poses':self.poses.poses,
-                'cloud_execution':'not connected'}
+                'cloud_execution':self.cloud.status() if self.cloud else 'not connected'}
 
     def action(self, payload):
         with self.lock:
             action = payload.get('action')
+            if action == 'cloud_ready':
+                if not self.cloud: raise ValueError('Cloud is not configured')
+                return self.cloud.authorize()
+            if action == 'cloud_pause':
+                if self.cloud: self.cloud.pause()
+                return {'queue_ready':False}
+            if self.cloud and (self.cloud.ready or self.cloud.lease):
+                if action != 'hold': raise ValueError('Pause cloud control before using manual controls')
+                self.cloud.pause()
             if action == 'enable':
                 return self.driver.enable()
             if action == 'hold':
@@ -131,10 +142,15 @@ def serve(driver, config):
                 self.respond(400, {'error':str(error)})
 
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+    if config.get('settings', {}).get('cloud_enabled'):
+        from .cloud import CloudBridge
+        operator.cloud = CloudBridge(driver, config, operator.poses)
+        operator.cloud.start()
     print(f'SO101 operator: http://127.0.0.1:{port}/ — read-only until explicitly enabled', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if operator.cloud: operator.cloud.close()
         server.server_close()

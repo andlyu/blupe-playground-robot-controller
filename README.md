@@ -23,8 +23,9 @@ operator panel. The released `v0.1.0-alpha.2` bundle remains YAM-only.
 
 **SO101 developer integration (source checkout):** LeRobot's Python SO101 robot
 and configuration, a local operator panel, and named camera capture/publishing.
-There is no C++ worker for SO101. Physical motion is not yet commissioned; cloud
-queue execution and hosted video routing are still separate work.
+There is no C++ worker for SO101. The cloud bridge supports robot-specific joint
+commands and trajectories, with explicit operator queue handoff. Physical motion
+is not yet commissioned; cameras use fresh snapshots and local MJPEG.
 See [SO101 setup](docs/SO101.md).
 
 Installation never starts motors or services.
@@ -92,8 +93,8 @@ SO101 uses the source installation and foreground startup described below.
 Validate with simulated hardware, then verify calibration and feedback before
 physical motion tests. Test target execution, safety limits, Python stalls,
 connection loss, stop behavior, and camera streaming before enabling queued runs.
-The cloud API already supports per-robot queues. The SO101 hardware profile is
-implemented separately; its cloud execution bridge still needs integration.
+The cloud API already supports per-robot queues. The SO101 hardware profile and cloud bridge use five joint targets and an empty
+right-arm array, with explicit operator queue authorization.
 
 ## Download and install YAM
 

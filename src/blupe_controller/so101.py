@@ -50,6 +50,20 @@ def validate_profile(config):
 
 
 
+def relative_limit(value):
+    if value is None:
+        return None
+    def number(v):
+        if type(v) not in (int,float) or not math.isfinite(v) or v<=0:
+            raise ValueError('max_relative_target must contain positive finite numbers')
+        return float(v)
+    if isinstance(value,dict):
+        if set(value)!=set(NAMES):
+            raise ValueError('max_relative_target must name all six motors')
+        return {k:number(v) for k,v in value.items()}
+    return number(value)
+
+
 def make_robot(config):
     from lerobot.robots.so_follower.config_so_follower import SO101FollowerConfig
     from lerobot.robots.so_follower.so_follower import SOFollower
@@ -59,7 +73,7 @@ def make_robot(config):
     robot_config = SO101FollowerConfig(
         port=settings['serial_port'], id=calibration_path.stem,
         calibration_dir=calibration_path.parent, use_degrees=True, cameras={},
-        max_relative_target=settings.get('max_relative_target'),
+        max_relative_target=relative_limit(settings.get('max_relative_target')),
         disable_torque_on_disconnect=settings.get('disable_torque_on_disconnect', False))
     return SOFollower(robot_config)
 
@@ -106,7 +120,7 @@ class SO101Driver:
                 gripper = float(observation['gripper.pos']) / 100
                 self._validate_target(joints, gripper)
             except Exception as error:
-                self.mode, self.error = 'fault', str(error)
+                self.mode, self.error = 'fault', f'{type(error).__name__}: {error}'
                 raise
             return {'mode':self.mode, 'error':self.error, 'joint_names':list(self.joint_names),
                     'joints_deg':joints, 'gripper':gripper}
@@ -140,7 +154,7 @@ class SO101Driver:
             try:
                 self.robot.bus.enable_torque()
             except Exception as error:
-                self.mode, self.error = 'fault', str(error)
+                self.mode, self.error = 'fault', f'{type(error).__name__}: {error}'
                 raise
             self.mode = 'active'
             return {**state, 'mode':self.mode}
@@ -157,7 +171,7 @@ class SO101Driver:
                 result['sent_action'] = sent
                 return result
             except Exception as error:
-                self.mode, self.error = 'fault', str(error)
+                self.mode, self.error = 'fault', f'{type(error).__name__}: {error}'
                 raise
 
     def hold(self):

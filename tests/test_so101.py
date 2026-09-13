@@ -144,3 +144,11 @@ class OperatorTests(unittest.TestCase):
         driver.enable.assert_not_called()
         self.assertEqual(request({'Host':'localhost:8096','X-Blupe-Control':'test-secret','Origin':'http://localhost:8096','Content-Length':'19'}),200)
         driver.enable.assert_called_once()
+
+
+class RelativeLimitTests(unittest.TestCase):
+    def test_integer_json_limit_is_converted_for_lerobot(self):
+        from blupe_controller.so101 import relative_limit
+        self.assertIs(type(relative_limit(5)),float)
+        for value in (True,0,-1,float('nan')):
+            with self.assertRaises(ValueError):relative_limit(value)
