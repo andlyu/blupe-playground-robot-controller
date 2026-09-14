@@ -32,7 +32,8 @@ def publish_episode(episode, repo, api, download, *, keep_published=False):
     digest = hashlib.sha256(raw).hexdigest()
     if digest != meta['samples_sha256']:
         raise ValueError('Finalized recording changed')
-    motion = classify_motion([json.loads(line) for line in raw.splitlines()])
+    motion = (classify_motion([json.loads(line) for line in raw.splitlines()])
+              if meta.get('robot_id', 'yam-1') == 'yam-1' else {'kind':'unknown'})
     if motion['kind'] == 'arm_check':
         atomic_json(receipt, {'samples_sha256':digest, 'status':'arm_check'})
         return
@@ -46,7 +47,7 @@ def publish_episode(episode, repo, api, download, *, keep_published=False):
         preview = render_video(episode, video, preview=True)
         preview.update(samples_sha256=digest, sha256=hashlib.sha256(video.read_bytes()).hexdigest())
         atomic_json(info_path, preview)
-    entry = {key:meta.get(key) for key in ('episode_id','started_at','task','outcome','rows','samples_sha256')}
+    entry = {key:meta.get(key) for key in ('episode_id','robot_id','hardware','started_at','task','outcome','rows','samples_sha256')}
     entry.update(preview=preview)
     with tempfile.TemporaryDirectory(prefix='yam-viewing-index-') as tmp:
         target = Path(tmp)

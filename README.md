@@ -234,3 +234,10 @@ It neither creates a cloud account nor changes the cloud dashboard deployment.
 ### SO101 auto-queue (single or bimanual)
 
 On macOS or Linux, enable the arm, move home, then choose **Enable Auto-queue** in the controller. Successful tasks return home before the next queued task starts. Pause, stop, disconnect, and errors cancel auto-queue. It is off after startup; launching the controller never enables motion automatically. Update an existing checkout with `git pull` and restart its controller process.
+
+## SO101 recording and uploads
+
+Single and bimanual SO101 can record cloud sessions and publish native data,
+Past runs videos and LeRobot visualizer exports. See the [Mac setup and cloud
+publisher guide](docs/SO101-RECORDING.md). Recording and transfer must be explicitly
+configured; pulling main alone does not enable uploads.

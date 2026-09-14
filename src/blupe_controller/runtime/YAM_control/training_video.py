@@ -10,7 +10,7 @@ import tempfile
 
 
 ORDER = ('left', 'top', 'right')
-# Bump when rendering changes: publishers must rebuild even if samples did not.
+# Bump when rendering changes; preserve the deployed cache contract.
 RENDER_VERSION = 4
 
 
@@ -67,8 +67,10 @@ def render_video(episode, output, *, preview=False):
         raise RuntimeError('FFmpeg is required for run video export')
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_suffix('.partial.mp4')
-    order = ('top', 'observer', 'left', 'right') if preview and any('observer_image_path' in r for r in rows) else ORDER
-    width, height = (1280, 768) if len(order) == 4 else (1920, 384)
+    order = tuple(meta['camera_devices']) if meta.get('robot_id', 'yam-1') != 'yam-1' else (('top', 'observer', 'left', 'right') if preview and any('observer_image_path' in r for r in rows) else ORDER)
+    if not 1 <= len(order) <= 4:
+        raise ValueError('Video requires one to four named cameras')
+    width, height = (1280, 768) if len(order) == 4 else (640 * len(order), 384)
     # See docs/refs/ffmpeg: explicit RGB24 geometry/rate, H.264 yuv420p +faststart.
     command = [encoder, '-y', '-loglevel', 'error', '-f', 'rawvideo', '-pixel_format', 'rgb24',
                '-video_size', f'{width}x{height}', '-framerate', '30' if preview else '10', '-i', '-', '-an',

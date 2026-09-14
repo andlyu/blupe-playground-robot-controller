@@ -10,6 +10,7 @@ time survives verbatim in `source_timestamp`, and `frame_gap` marks a row whose
 real interval exceeded 1.5 nominal periods, i.e. the recorder missed a tick.
 Nothing is resampled: no joint value or camera frame is invented to fill a gap.
 """
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -44,10 +45,49 @@ SOURCE_FLOATS = ['source_timestamp', 'action_timestamp', 'camera_skew_s',
 SOURCE_INTS = [n + '_frame_sequence' for n in CAMERA_ORDER]
 
 
-def source_fingerprint(episode, meta, rows):
+@dataclass(frozen=True)
+class RobotLayout:
+    cameras: tuple
+    motors: tuple
+    joints_per_arm: int
+    arms: int
+    robot_type: str
+
+    @property
+    def source_floats(self):
+        return ['source_timestamp', 'action_timestamp', 'camera_skew_s',
+                *(n + suffix for n in self.cameras for suffix in ('_frame_age_s', '_camera_timestamp'))]
+
+    @property
+    def source_ints(self):
+        return [n + '_frame_sequence' for n in self.cameras]
+
+
+YAM_LAYOUT = RobotLayout(CAMERA_ORDER, tuple(MOTORS), 6, 2, ROBOT_TYPE)
+
+
+def robot_layout(meta):
+    hardware = meta.get('hardware')
+    if hardware not in ('so101', 'bimanual_so101'):
+        raise ValueError('Unsupported robot layout')
+    arms = 1 if hardware == 'so101' else 2
+    joints = meta['joint_names']
+    if len(joints) != arms * 5 or len(set(joints)) != len(joints):
+        raise ValueError('Unexpected SO101 joint names')
+    cameras = tuple(meta['camera_devices'])
+    if not cameras or any(not name.isidentifier() for name in cameras):
+        raise ValueError('Invalid camera roles')
+    motors = []
+    for arm in range(arms):
+        motors.extend(joints[arm*5:(arm+1)*5])
+        motors.append(('left_gripper' if arm == 0 else 'right_gripper') if arms == 2 else 'gripper')
+    return RobotLayout(cameras, tuple(motors), 5, arms, hardware)
+
+
+def source_fingerprint(episode, meta, rows, layout=YAM_LAYOUT):
     digest = hashlib.sha256(json.dumps(meta, sort_keys=True).encode())
     for row in rows:
-        for name in CAMERA_ORDER:
+        for name in layout.cameras:
             digest.update(image_path(episode, row, name).read_bytes())
     return digest.hexdigest()
 
@@ -56,17 +96,20 @@ def video_key(name):
     return f'observation.images.{name}'
 
 
-def state_vector(joints, grippers):
+def state_vector(joints, grippers, layout=YAM_LAYOUT):
     """Interleave recorder [left 0-5, right 0-5] + [left, right] grippers."""
-    if len(joints) != 12 or len(grippers) != 2:
-        raise ValueError('Recording must hold 12 joints and 2 grippers')
-    values = [*joints[:6], grippers[0], *joints[6:], grippers[1]]
+    if len(joints) != layout.joints_per_arm * layout.arms or len(grippers) != layout.arms:
+        raise ValueError('Recording does not match robot joint/gripper layout')
+    values = []
+    for arm in range(layout.arms):
+        values.extend(joints[arm*layout.joints_per_arm:(arm+1)*layout.joints_per_arm])
+        values.append(grippers[arm])
     if not all(math.isfinite(x) for x in values):
         raise ValueError('Non-finite joint value')
     return [float(x) for x in values]
 
 
-def load_episode(episode):
+def load_episode(episode, layout=YAM_LAYOUT):
     """Read a finalized physical recording, refusing edited or simulated ones."""
     episode = Path(episode)
     meta = json.loads((episode / 'manifest.json').read_text())
@@ -78,7 +121,7 @@ def load_episode(episode):
     rows = [json.loads(line) for line in raw.splitlines()]
     if not rows or len(rows) != meta['rows']:
         raise ValueError('Invalid finalized sample count')
-    if set(CAMERA_ORDER) != set(CAMERAS):
+    if set(layout.cameras) != set(meta.get('camera_devices', CAMERAS)):
         raise ValueError('Camera set changed without updating the LeRobot export')
     return meta, rows
 
@@ -90,7 +133,7 @@ def image_path(episode, row, name):
     return path
 
 
-def episode_columns(meta, rows, *, episode_index, task_index, index_offset):
+def episode_columns(meta, rows, *, episode_index, task_index, index_offset, layout=YAM_LAYOUT):
     """Per-frame columns for one episode, in canonical LeRobot v2.1 order."""
     fps = meta['fps']
     if not math.isfinite(fps) or fps <= 0:
@@ -103,8 +146,8 @@ def episode_columns(meta, rows, *, episode_index, task_index, index_offset):
         if not math.isfinite(source) or source < 0 or (previous is not None and source <= previous):
             raise ValueError('Invalid source timeline')
         column = {
-            'observation.state': state_vector(row['measured_joints'], row['measured_grippers']),
-            'action': state_vector(row['action_joints'], row['action_grippers']),
+            'observation.state': state_vector(row['measured_joints'], row['measured_grippers'], layout=layout),
+            'action': state_vector(row['action_joints'], row['action_grippers'], layout=layout),
             'timestamp': frame_index / fps,
             'frame_index': frame_index,
             'episode_index': episode_index,
@@ -117,7 +160,7 @@ def episode_columns(meta, rows, *, episode_index, task_index, index_offset):
             'action_valid': bool(row['action_valid']),
             'camera_skew_s': row['camera_skew_s'],
         }
-        for name in CAMERA_ORDER:
+        for name in layout.cameras:
             column[name + '_frame_age_s'] = row[name + '_frame_age_s']
             column[name + '_camera_timestamp'] = row[name + '_camera_timestamp']
             column[name + '_frame_sequence'] = row[name + '_frame_sequence']
@@ -126,14 +169,14 @@ def episode_columns(meta, rows, *, episode_index, task_index, index_offset):
     return columns
 
 
-def build_features(fps, camera_shapes):
+def build_features(fps, camera_shapes, layout=YAM_LAYOUT):
     """info.json feature block: videos live in MP4s, everything else in Parquet."""
-    motors = {'motors': list(MOTORS)}
+    motors = {'motors': list(layout.motors)}
     features = {
-        'observation.state': {'dtype': 'float32', 'shape': [len(MOTORS)], 'names': motors},
-        'action': {'dtype': 'float32', 'shape': [len(MOTORS)], 'names': motors},
+        'observation.state': {'dtype': 'float32', 'shape': [len(layout.motors)], 'names': motors},
+        'action': {'dtype': 'float32', 'shape': [len(layout.motors)], 'names': motors},
     }
-    for name in CAMERA_ORDER:
+    for name in layout.cameras:
         features[video_key(name)] = {
             'dtype': 'video', 'shape': list(camera_shapes[name]),
             'names': ['height', 'width', 'channel'],
@@ -142,28 +185,28 @@ def build_features(fps, camera_shapes):
                            'has_audio': False},
         }
     features['timestamp'] = {'dtype': 'float32', 'shape': [1], 'names': None}
-    for name in SOURCE_FLOATS:
+    for name in layout.source_floats:
         features[name] = {'dtype': 'float64', 'shape': [1], 'names': None}
-    for name in ['frame_index', 'episode_index', 'index', 'task_index', *SOURCE_INTS]:
+    for name in ['frame_index', 'episode_index', 'index', 'task_index', *layout.source_ints]:
         features[name] = {'dtype': 'int64', 'shape': [1], 'names': None}
     for name in ['frame_gap', 'training_valid', 'action_valid']:
         features[name] = {'dtype': 'bool', 'shape': [1], 'names': None}
     return features
 
 
-def write_parquet(columns, destination):
+def write_parquet(columns, destination, layout=YAM_LAYOUT):
     from datasets import Dataset, Features, Sequence, Value
     import pyarrow
     pyarrow.set_cpu_count(1)
     pyarrow.set_io_thread_count(1)
     features = {
-        'observation.state': Sequence(Value('float32'), length=len(MOTORS)),
-        'action': Sequence(Value('float32'), length=len(MOTORS)),
+        'observation.state': Sequence(Value('float32'), length=len(layout.motors)),
+        'action': Sequence(Value('float32'), length=len(layout.motors)),
     }
     features['timestamp'] = Value('float32')
-    for name in SOURCE_FLOATS:
+    for name in layout.source_floats:
         features[name] = Value('float64')
-    for name in ['frame_index', 'episode_index', 'index', 'task_index', *SOURCE_INTS]:
+    for name in ['frame_index', 'episode_index', 'index', 'task_index', *layout.source_ints]:
         features[name] = Value('int64')
     for name in ['frame_gap', 'training_valid', 'action_valid']:
         features[name] = Value('bool')
@@ -248,7 +291,7 @@ def _image_stats(paths):
     return stats
 
 
-def episode_stats(episode, rows, columns):
+def episode_stats(episode, rows, columns, layout=YAM_LAYOUT):
     """Per-episode statistics in the official v2.1 shape."""
     import numpy as np
     stats = {}
@@ -259,7 +302,7 @@ def episode_stats(episode, rows, columns):
         stats[name] = {'min': np.min(values, axis=0), 'max': np.max(values, axis=0),
                        'mean': np.mean(values, axis=0), 'std': np.std(values, axis=0),
                        'count': np.array([len(columns)])}
-    for name in CAMERA_ORDER:
+    for name in layout.cameras:
         stats[video_key(name)] = _image_stats([image_path(episode, row, name) for row in rows])
     return stats
 
@@ -312,15 +355,15 @@ def write_jsonl(path, records):
     tmp.replace(path)
 
 
-def append_episode(root, episode, *, task=None):
+def append_episode(root, episode, *, task=None, layout=YAM_LAYOUT):
     """Add one finalized recording to a local v2.1 root; idempotent per episode ID.
 
     Only meta/ has to exist beforehand, so the publisher can build an upload
     payload holding just the new episode plus refreshed metadata.
     """
     root, episode = Path(root), Path(episode)
-    meta, rows = load_episode(episode)
-    fingerprint = source_fingerprint(episode, meta, rows)
+    meta, rows = load_episode(episode, layout=layout)
+    fingerprint = source_fingerprint(episode, meta, rows, layout=layout)
     registry = read_jsonl(root / REGISTRY)
     for entry in registry:
         if entry['episode_id'] == meta['episode_id']:
@@ -340,24 +383,24 @@ def append_episode(root, episode, *, task=None):
         known[text] = len(tasks)
         tasks.append({'task_index': known[text], 'task': text})
     columns = episode_columns(meta, rows, episode_index=episode_index, task_index=known[text],
-                              index_offset=sum(entry['length'] for entry in episodes))
+                              index_offset=sum(entry['length'] for entry in episodes), layout=layout)
 
     # Data before metadata: a crash can leave an unreferenced file, never a
     # metadata entry pointing at one that does not exist.
     shapes = {}
-    for name in CAMERA_ORDER:
+    for name in layout.cameras:
         target = root / VIDEO_PATH.format(episode_chunk=chunk, video_key=video_key(name),
                                           episode_index=episode_index)
         shapes[name] = encode_camera_video(episode, rows, name, target, meta['fps'])
-    features = build_features(meta['fps'], shapes)
+    features = build_features(meta['fps'], shapes, layout=layout)
     info_path = root / 'meta/info.json'
     if info_path.exists():
         previous_info = json.loads(info_path.read_text())
         if previous_info['fps'] != meta['fps'] or previous_info['features'] != features:
             raise ValueError('Recording FPS or camera schema differs from existing dataset')
-    write_parquet(columns, root / DATA_PATH.format(episode_chunk=chunk, episode_index=episode_index))
+    write_parquet(columns, root / DATA_PATH.format(episode_chunk=chunk, episode_index=episode_index), layout=layout)
 
-    stats = episode_stats(episode, rows, columns)
+    stats = episode_stats(episode, rows, columns, layout=layout)
     per_episode = read_jsonl(root / 'meta/episodes_stats.jsonl')
     per_episode.append({'episode_index': episode_index, 'stats': _plain(stats)})
     episodes.append({'episode_index': episode_index, 'tasks': [text], 'length': len(rows)})
@@ -377,9 +420,9 @@ def append_episode(root, episode, *, task=None):
                 _plain(aggregate_stats([record['stats'] for record in per_episode])))
     total_frames = sum(record['length'] for record in episodes)
     atomic_json(root / 'meta/info.json', {
-        'codebase_version': CODEBASE_VERSION, 'robot_type': ROBOT_TYPE,
+        'codebase_version': CODEBASE_VERSION, 'robot_type': layout.robot_type,
         'total_episodes': len(episodes), 'total_frames': total_frames,
-        'total_tasks': len(tasks), 'total_videos': len(episodes) * len(CAMERA_ORDER),
+        'total_tasks': len(tasks), 'total_videos': len(episodes) * len(layout.cameras),
         'total_chunks': chunk + 1, 'chunks_size': CHUNKS_SIZE, 'fps': meta['fps'],
         'splits': {'train': f'0:{len(episodes)}'}, 'data_path': DATA_PATH,
         'video_path': VIDEO_PATH, 'features': features,
@@ -388,9 +431,9 @@ def append_episode(root, episode, *, task=None):
     return entry
 
 
-def episode_files(episode_index):
+def episode_files(episode_index, layout=YAM_LAYOUT):
     """Repository paths written for one episode, for upload verification."""
     chunk = episode_index // CHUNKS_SIZE
     return [DATA_PATH.format(episode_chunk=chunk, episode_index=episode_index),
             *(VIDEO_PATH.format(episode_chunk=chunk, video_key=video_key(name),
-                                episode_index=episode_index) for name in CAMERA_ORDER)]
+                                episode_index=episode_index) for name in layout.cameras)]

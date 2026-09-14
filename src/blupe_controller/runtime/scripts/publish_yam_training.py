@@ -17,6 +17,14 @@ LEROBOT_META = ['meta/info.json', 'meta/episodes.jsonl', 'meta/tasks.jsonl',
                 'meta/blupe_source_episodes.jsonl']
 
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024*1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def export_episode(episode, destination):
     from datasets import Dataset, Features, Image, Sequence, Value
     import pyarrow
@@ -26,6 +34,9 @@ def export_episode(episode, destination):
     meta = json.loads((episode / 'manifest.json').read_text())
     if meta['status'] != 'finalized' or meta.get('simulated'):
         raise ValueError('Only finalized physical episodes may be published')
+    cameras = meta.get('camera_devices', CAMERAS)
+    joint_count = len(meta.get('joint_names', [])) or 12
+    gripper_count = 1 if meta.get('hardware') == 'so101' else 2
     raw = (episode / 'samples.jsonl').read_bytes()
     if hashlib.sha256(raw).hexdigest() != meta['samples_sha256']:
         raise ValueError('Recording changed after finalization')
@@ -34,42 +45,56 @@ def export_episode(episode, destination):
         'action_valid': 'bool', 'action_timestamp': 'float64', 'camera_skew_s': 'float64',
         'training_valid': 'bool', 'outcome': 'string', 'task': 'string',
     }.items()}
-    for k, length in [('measured_joints', 12), ('measured_grippers', 2),
-                      ('action_joints', 12), ('action_grippers', 2)]:
+    for k, length in [('measured_joints', joint_count), ('measured_grippers', gripper_count),
+                      ('action_joints', joint_count), ('action_grippers', gripper_count)]:
         features[k] = Sequence(Value('float64'), length=length)
-    for key, length in [('measured_joint_effort',12), ('measured_joint_velocity',12),
-                        ('measured_gripper_effort',2), ('measured_gripper_velocity',2)]:
+    for key, length in [('measured_joint_effort',joint_count), ('measured_joint_velocity',joint_count),
+                        ('measured_gripper_effort',gripper_count), ('measured_gripper_velocity',gripper_count)]:
         features[key] = Sequence(Value('float64'), length=length)
-    for name in CAMERAS:
+    for name in cameras:
         features[name + '_image'] = Image()
         for key in ['camera_timestamp', 'frame_age_s']:
             features[name + '_' + key] = Value('float64')
         features[name + '_frame_sequence'] = Value('int64')
-    rows = []
-    image_hashes = hashlib.sha256()
-    for line in raw.splitlines():
-        sample = json.loads(line)
-        row = {key: sample[key] for key in features if key in sample}
-        row['outcome'] = meta['outcome']
-        row['task'] = meta.get('task')
-        for name in CAMERAS:
-            image_path = (episode / sample[name + '_image_path']).resolve()
-            if image_path.parent != (episode / 'images').resolve():
-                raise ValueError('Image path escapes recording')
-            body = image_path.read_bytes()
-            from PIL import Image as PILImage
-            import io
-            with PILImage.open(io.BytesIO(body)) as image:
-                image.verify()
-            image_hashes.update(body)
-            row[name + '_image'] = {'bytes': body, 'path': None}
-        rows.append(row)
-    if not rows or len(rows) != meta['rows']:
-        raise ValueError('Invalid finalized sample count')
+    import pyarrow.parquet as pq
     (destination / 'data').mkdir(parents=True)
     (destination / 'episodes').mkdir()
     parquet = destination / 'data' / (meta['episode_id'] + '.parquet')
-    Dataset.from_list(rows, features=Features(features)).to_parquet(str(parquet), batch_size=128)
+    rows = []
+    count = 0
+    image_hashes = hashlib.sha256()
+    # Bounded image batches; see docs/refs/huggingface-hub/parquet-batch-writer.md.
+    with pq.ParquetWriter(str(parquet), Features(features).arrow_schema) as writer:
+        for line in raw.splitlines():
+            sample = json.loads(line)
+            # Older finalized recordings predate optional motor telemetry.
+            row = {key: sample.get(key) for key in features}
+            for key, width in [('measured_joint_effort', joint_count), ('measured_joint_velocity', joint_count),
+                               ('measured_gripper_effort', gripper_count), ('measured_gripper_velocity', gripper_count)]:
+                if row[key] is None:
+                    row[key] = [None] * width
+            row['outcome'] = meta['outcome']
+            row['task'] = meta.get('task')
+            for name in cameras:
+                image_path = (episode / sample[name + '_image_path']).resolve()
+                if image_path.parent != (episode / 'images').resolve():
+                    raise ValueError('Image path escapes recording')
+                body = image_path.read_bytes()
+                from PIL import Image as PILImage
+                import io
+                with PILImage.open(io.BytesIO(body)) as image:
+                    image.verify()
+                image_hashes.update(body)
+                row[name + '_image'] = {'bytes': body, 'path': None}
+            rows.append(row)
+            count += 1
+            if len(rows) >= 16:
+                writer.write_table(Dataset.from_list(rows, features=Features(features)).data.table)
+                rows.clear()
+        if rows:
+            writer.write_table(Dataset.from_list(rows, features=Features(features)).data.table)
+    if not count or count != meta['rows']:
+        raise ValueError('Invalid finalized sample count')
     from YAM_control.training_video import RENDER_VERSION, render_video
     video = episode / 'video.mp4'
     video_info = episode / 'video.json'
@@ -90,8 +115,7 @@ def export_episode(episode, destination):
     viewing_video = episode / 'viewing.mp4'
     if viewing_info.exists() and viewing_video.exists():
         viewing = json.loads(viewing_info.read_text())
-        if (viewing.get('render_version') == RENDER_VERSION and
-                viewing.get('samples_sha256') == meta['samples_sha256'] and
+        if (viewing.get('render_version') == RENDER_VERSION and viewing.get('samples_sha256') == meta['samples_sha256'] and
                 viewing.get('sha256') == hashlib.sha256(viewing_video.read_bytes()).hexdigest()):
             shutil.copyfile(viewing_video, preview)
             atomic_json(preview_info, viewing)
@@ -110,7 +134,7 @@ def export_episode(episode, destination):
     manifest.pop('started_monotonic', None)
     manifest.pop('ended_monotonic', None)
     manifest.update(video=saved_video, preview=saved_preview,
-                    parquet_sha256=hashlib.sha256(parquet.read_bytes()).hexdigest(),
+                    parquet_sha256=file_sha256(parquet),
                     images_sha256=image_hashes.hexdigest(), dataset_title='Public YAM runs')
     atomic_json(destination / 'episodes' / (meta['episode_id'] + '.json'), manifest)
     return manifest
@@ -132,7 +156,7 @@ def recover_orphan(episode, meta):
     for line in samples.read_bytes().splitlines() if samples.exists() else []:
         try:
             row = json.loads(line)
-            if not all((episode / row[n + '_image_path']).is_file() for n in CAMERAS):
+            if not all((episode / row[n + '_image_path']).is_file() for n in meta.get('camera_devices', CAMERAS)):
                 raise ValueError('Missing image')
             rows.append(row)
         except (ValueError, KeyError):
@@ -169,7 +193,7 @@ def publish_once(root, api=None, *, repo=REPO):
         if since and meta.get('started_at', 0) >= since:
             receipt = episode / 'viewing-upload.json'
             viewing = json.loads(receipt.read_text()) if receipt.exists() else {}
-            if (viewing.get('samples_sha256') != meta.get('samples_sha256') or
+            if (viewing.get('render_version') == RENDER_VERSION and viewing.get('samples_sha256') != meta.get('samples_sha256') or
                     viewing.get('status') not in ('uploaded', 'arm_check')):
                 continue
         if state.get('retry_at', 0) > time.time():
@@ -254,8 +278,11 @@ def publish_once(root, api=None, *, repo=REPO):
                                                    commit_message=f'Repair LeRobot provenance for {eid}')
                         revision = commit.oid
                 else:
-                    shutil.copyfile(Path(__file__).resolve().parents[1] / 'docs/PUBLIC-YAM-DATASET-CARD.md',
-                                    Path(temp) / 'README.md')
+                    # Preserve robot-specific configs added by other publishers.
+                    card = (hf_hub_download(repo, 'README.md', repo_type='dataset', revision=revision)
+                            if api.file_exists(repo, 'README.md', repo_type='dataset', revision=revision)
+                            else Path(__file__).resolve().parents[1] / 'docs/PUBLIC-YAM-DATASET-CARD.md')
+                    shutil.copyfile(card, Path(temp) / 'README.md')
                     commit = api.upload_folder(repo_id=repo, repo_type='dataset', folder_path=temp,
                                                parent_commit=revision,
                                                commit_message=f'Add LeRobot YAM episode {eid}')

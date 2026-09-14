@@ -3,7 +3,7 @@
 Video processing runs on the robot-side computer in independent workers after
 recording finalizes. The browser loads the published MP4; Codex does not encode
 or upload it. These workers operate on saved YAM recordings only and never
-initialize motors or open cameras. SO101 recording/export is not added here.
+initialize motors or open cameras. For single and bimanual SO101 recording and exports, see [SO101 recording](SO101-RECORDING.md).
 
 The source under `src/blupe_controller/runtime` includes:
 

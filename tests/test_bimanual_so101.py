@@ -54,6 +54,7 @@ def test_bimanual_cloud_preserves_right_arm():
     from blupe_controller.cloud import CloudBridge
     from blupe_controller.tolerances import near_pose
     bridge=CloudBridge.__new__(CloudBridge)
+    bridge.recorded_command = None
     bridge.config={'hardware':'bimanual_so101','api':'https://example.com','robot_id':'test','cameras':{}}
     class Driver:
         def state(self): return dict(joints_deg=[0]*10,gripper=[.2,.7])

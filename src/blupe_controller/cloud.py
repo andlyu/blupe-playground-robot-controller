@@ -1,6 +1,8 @@
 """Robot-scoped cloud bridge. Each queue handoff requires explicit operator action."""
 from .tolerances import near_pose
 import json
+import copy
+import math
 from pathlib import Path
 import threading
 import time
@@ -22,6 +24,10 @@ class CloudBridge:
         self.return_home = None
         self.lease = None
         self.step = 0
+        self.recorder = None
+        self.recording_error = ""
+        self.recorded_command = None
+        self.recorded_snapshot = (None, None, 0.)
         self.pending = False
         self.generation = 0
         self.client = SessionApiSimClient(self, config['api'].replace('https://','wss://',1)+'/v1/jetsons/connect',
@@ -34,8 +40,18 @@ class CloudBridge:
         self.pause()
         self.client.stop()
 
-    def pause(self):
+    def cache_recording_state(self, state):
+        self.recorded_snapshot = (copy.deepcopy(state), self.recorded_command, time.monotonic())
+
+    def finish_recording(self, outcome):
+        if self.recorder is not None:
+            self.recorder.finish(outcome)
+            self.recorder = None
+        self.recorded_command = None
+
+    def pause(self, reason="operator_paused"):
         with self.lock:
+            self.finish_recording(reason)
             owned = self.ready or self.lease is not None or self.auto_queue
             self.auto_queue = False
             self.ready = False
@@ -90,24 +106,26 @@ class CloudBridge:
     def status(self):
         with self.lock:
             return {'connected':self.connected,'queue_ready':self.ready,'session_active':self.lease is not None,
-                    'command_active':self.pending,'error':self.error,'auto_queue':self.auto_queue}
+                    'command_active':self.pending,'error':self.error,'auto_queue':self.auto_queue,
+                    'recording':dict(self.recorder.meta) if self.recorder else None, 'recording_error':self.recording_error}
 
     def api_connection_changed(self, connected, error=None):
         with self.lock:
             self.connected = connected
             self.error = error or ''
             if not connected:
-                self.pause()
+                self.pause("connection_lost")
 
     def api_error_received(self, error):
         with self.lock:
             self.error = error
-            self.pause()
+            self.pause("api_error")
 
     def envelope(self, kind, **fields):
         return {'schema_version':1,'type':kind,**(self.lease or {}),**fields}
 
     def image_fields(self, state):
+        self.cache_recording_state(state)
         return {'observed_at':time.time(),'left_joints_deg':state['joints_deg'][:5] if self.config.get('hardware')=='bimanual_so101' else state['joints_deg'],
                 'right_joints_deg':state['joints_deg'][5:] if self.config.get('hardware')=='bimanual_so101' else [],
                 'left_gripper':state['gripper'][0] if isinstance(state['gripper'],list) else state['gripper'],
@@ -133,7 +151,19 @@ class CloudBridge:
             self.lease = lease
             self.ready = False
             self.step = 0
-            return self.observation()
+            observation = self.observation()
+            root = self.config['settings'].get('recording_root')
+            if root:
+                try:
+                    from .recording import EpisodeRecorder
+                    self.recorder = EpisodeRecorder(root, self.config, lease['episode_id'], payload.get('task'),
+                                                    self.driver.joint_names, lambda: self.recorded_snapshot)
+                    self.recorder.start()
+                    self.recording_error = ''
+                except Exception as error:
+                    self.recording_error = type(error).__name__
+                    self.recorder = None
+            return observation
 
     def check(self, payload):
         if not self.lease or any(payload.get(k)!=v for k,v in self.lease.items()):
@@ -209,6 +239,10 @@ class CloudBridge:
                     requested = self.driver._action(joints,gripper)
                     if any(abs(sent.get(k,float('inf'))-v)>1e-6 for k,v in requested.items()):
                         raise ValueError('LeRobot clipped target; send smaller joint steps')
+                    self.recorded_command = {'joints':[math.radians(v) for v in joints],
+                                             'grippers':list(gripper) if isinstance(gripper,list) else [gripper],
+                                             'monotonic':time.monotonic()}
+                    self.cache_recording_state(result)
                     if trajectory:
                         self.client.send(self.envelope('trajectory_progress',trajectory_id=payload['trajectory_id'],step_id=self.step+index,executed_at=time.time()))
             deadline = time.monotonic()+10
@@ -218,6 +252,7 @@ class CloudBridge:
                     if generation!=self.generation:
                         return
                     state = self.driver.state()
+                    self.cache_recording_state(state)
                     now = time.monotonic()
                     if self.near(state,joints,gripper):
                         settled = now if settled is None else settled
@@ -247,11 +282,12 @@ class CloudBridge:
                     self.client.send(self.envelope('trajectory_result',trajectory_id=payload['trajectory_id'],status='aborted',reported_at=time.time(),code='controller_error',message=str(error)))
                 else:
                     self.client.send(self.envelope('action_result',step_id=payload['step_id'],command_id=payload['command_id'],status='rejected',reason=str(error)))
-                self.pause()
+                self.pause("controller_error")
 
     def api_handle_stop(self, payload):
         with self.lock:
             if self.lease and all(payload.get(k)==v for k,v in self.lease.items()):
+                self.finish_recording(payload.get('reason') or 'session_stopped')
                 if self.auto_queue and payload.get('reason') == 'policy_complete' and not self.pending and self.return_home:
                     self.lease = None
                     self.ready = False
