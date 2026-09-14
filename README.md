@@ -37,6 +37,10 @@ verified motor-to-URDF mapping are still required. See [Jetson setup](docs/MAKER
 
 Installation never starts motors or services.
 
+YAM saved-video processing and Past runs upload workers are included in the
+source checkout. See [video processing](docs/VIDEO-PROCESSING.md) for setup and
+`--keep-published` deployments that leave existing videos unchanged.
+
 ## Code layout
 
 One command, `blupe-controller --config <profile.json> run`, selects the runtime

@@ -29,6 +29,12 @@
     "scripts/yam_operator_sim_web.py": "73e9fede6eca57ad6267036a5e26a501abe95709168f5dbb66c5766cfd84e021",
     "YAM_control/error_history.py": "c02318f482f67a2f4bbcfb8a88c5d6731811cb8a12d230bf84593c63c901a12b",
     "YAM_control/session_api_sim_client.py": "a807d288a08326f45e7020e5366f77a9205feecf968ea3aa078d32842d1ba59d",
-    "YAM_control/workspace_visuals.py": "5db2638a5e5d3d531cc139f84c8dd5f7593918a87a125d9049fa563a8966c6e4"
+    "YAM_control/workspace_visuals.py": "5db2638a5e5d3d531cc139f84c8dd5f7593918a87a125d9049fa563a8966c6e4",
+    "YAM_control/training_video.py": "f7a46e9e81075c71d670a29e08a49a59c75ff4e34a8137c2d01e28689d4c1121",
+    "YAM_control/motion_classification.py": "1a2a0bbc48a0b2099dcfb5683c61011fe525a0cb8bf7ab0e6968e7e08867a7fa",
+    "YAM_control/lerobot_dataset.py": "8ace81e23b1b56792f66094dc6589815599206d082b0de0f7aa2069db7f6f234",
+    "scripts/publish_yam_viewing.py": "6f2f4189cc02928e9638eeab8473fca0a067d0306a6d8c88741069690dd12a37",
+    "scripts/publish_yam_training.py": "8ec59181e5c3de716031a2502dbb840f1c9fa9804550ffc09c291554a16c42ee",
+    "scripts/publish_yam_previews.py": "ebebaef19bb1cfcc1d2e6f0b118a09d95b2e79e918c03f69efa5c8481332226a"
   }
 }

@@ -1,0 +1,23 @@
+# Adjust checkout, environment, recording root and credential-file paths before use.
+# Install this unit explicitly; controller installation never starts publishers.
+[Unit]
+Description=Publish BluPe YAM Past runs previews
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/blupe-playground-robot-controller
+Environment=PYTHONPATH=%h/blupe-playground-robot-controller/src/blupe_controller/runtime
+Environment=HF_TOKEN_PATH=%h/.config/yam-dataset/hf_token
+Environment=HF_HUB_DISABLE_PROGRESS_BARS=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+UnsetEnvironment=HF_TOKEN
+ExecStart=%h/blupe-playground-robot-controller/.venv-video/bin/python -m scripts.publish_yam_viewing --root %h/blupe-playground-robot-controller/outputs/yam-training --keep-published
+Restart=always
+RestartSec=10
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+
+[Install]
+WantedBy=default.target
