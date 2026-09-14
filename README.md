@@ -219,3 +219,7 @@ It neither creates a cloud account nor changes the cloud dashboard deployment.
 ### SO101 saved pose example
 
 See [SO101 zero and home targets](examples/so101/README.md) for recorded joint targets and calibration compatibility notes.
+
+### YAM saved pose example
+
+See [YAM zero and home targets](examples/yam/README.md) for the existing dual-arm targets and units.
