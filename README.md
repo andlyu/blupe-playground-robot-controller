@@ -215,3 +215,7 @@ use a dedicated account with no shell access. Host verification is mandatory.
 This command forwards the operator console on local port 8096; the existing
 independent hard-off service/tunnel on 8098 remains separately provisioned.
 It neither creates a cloud account nor changes the cloud dashboard deployment.
+
+### SO101 saved pose example
+
+See [SO101 zero and home targets](examples/so101/README.md) for recorded joint targets and calibration compatibility notes.
