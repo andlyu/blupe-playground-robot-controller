@@ -226,3 +226,7 @@ It neither creates a cloud account nor changes the cloud dashboard deployment.
 
 - [SO101 zero/home targets and Andrew’s calibration](examples/so101/README.md)
 - [YAM zero/home targets](examples/yam/README.md)
+
+### SO101 auto-queue (single or bimanual)
+
+On macOS or Linux, enable the arm, move home, then choose **Enable Auto-queue** in the controller. Successful tasks return home before the next queued task starts. Pause, stop, disconnect, and errors cancel auto-queue. It is off after startup; launching the controller never enables motion automatically. Update an existing checkout with `git pull` and restart its controller process.

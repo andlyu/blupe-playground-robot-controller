@@ -1,5 +1,6 @@
 import time
 import unittest
+import pytest
 from unittest.mock import Mock, patch
 from blupe_controller.cloud import CloudBridge
 from blupe_controller.so101 import SO101Driver
@@ -78,9 +79,10 @@ def test_home_and_trajectory_share_so101_tolerance():
     assert not CloudBridge.near(state,[0.]*5,.1,joint_tolerance_deg=5.)
 
 
-def test_auto_queue_completes_then_homes_and_reauthorizes():
+@pytest.mark.parametrize("hardware", ["so101", "bimanual_so101"])
+def test_auto_queue_completes_then_homes_and_reauthorizes(hardware):
     case=CloudTests();case.setUp();b=case.bridge
-    b.config['hardware']='bimanual_so101'; b.authorize=Mock()
+    b.config['hardware']=hardware; b.authorize=Mock()
     b.set_auto_queue(True);assert b.auto_queue
     b.lease=case.ids.copy();b.return_home=Mock()
     with patch('blupe_controller.cloud.threading.Thread') as thread:

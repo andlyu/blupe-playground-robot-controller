@@ -68,8 +68,8 @@ class CloudBridge:
             if not enabled:
                 self.pause()
             else:
-                if self.config.get('hardware') != 'bimanual_so101':
-                    raise ValueError('Auto-queue is supported for bimanual SO101')
+                if self.config.get('hardware') not in ('so101', 'bimanual_so101'):
+                    raise ValueError('Auto-queue is supported for SO101 controllers')
                 if self.auto_queue: return self.status()
                 self.authorize()
                 self.auto_queue = True
