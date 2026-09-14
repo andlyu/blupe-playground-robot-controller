@@ -55,3 +55,54 @@ class MotionTests(unittest.TestCase):
         self.assertTrue(o.driver.sent)
         self.assertLessEqual(max(max(q) for q,g in o.driver.sent),5.)
         self.assertLessEqual(max(g for q,g in o.driver.sent),.05)
+
+    def queue_operator(self, stuck=False):
+        from unittest.mock import patch
+        from blupe_controller.cloud import CloudBridge
+        o=self.operator(stuck)
+        config={'robot_id':'test','api':'https://example.com','token_file':'/tmp/credential','cameras':{},'settings':{}}
+        with patch('blupe_controller.cloud.SessionApiSimClient'):
+            o.cloud=CloudBridge(o.driver,config,o.poses)
+        o.poses.poses['home']={'joints_deg':[0.]*5,'gripper':0.}
+        o.cloud.connected=True
+        o.cloud.auto_queue=True
+        o.cloud.lease={'session_id':'s','episode_id':'e','lease_id':'l'}
+        o.cloud.on_session_complete=o.return_home_for_queue
+        o.driver.q=[10.]*5
+        return o
+
+    def test_autoqueue_returns_home_with_bounded_motion_and_rearms(self):
+        import io
+        from unittest.mock import patch
+        o=self.queue_operator()
+        with patch('blupe_controller.cloud.urlopen',return_value=io.BytesIO(b'{"ok":true}')):
+            o.cloud.api_handle_stop({**o.cloud.lease,'reason':'policy_complete'})
+            self.wait(o)
+        self.assertTrue(o.cloud.ready)
+        self.assertTrue(o.cloud.auto_queue)
+        self.assertTrue(o.driver.sent)
+        previous=[10.]*5
+        for q,g in o.driver.sent:
+            self.assertLessEqual(max(abs(a-b) for a,b in zip(q,previous)),1.)
+            previous=q
+
+    def test_pause_during_autoqueue_return_stops_motion_and_handoff(self):
+        o=self.queue_operator()
+        o.cloud.api_handle_stop({**o.cloud.lease,'reason':'policy_complete'})
+        time.sleep(.15)
+        o.action({'action':'cloud_pause'})
+        count=len(o.driver.sent)
+        self.wait(o)
+        self.assertEqual(len(o.driver.sent),count)
+        self.assertFalse(o.cloud.auto_queue)
+        self.assertFalse(o.cloud.ready)
+        o.cloud.client.request_ready.assert_not_called()
+
+    def test_failed_autoqueue_home_cannot_accept_next_task(self):
+        o=self.queue_operator(stuck=True)
+        o.cloud.api_handle_stop({**o.cloud.lease,'reason':'policy_complete'})
+        self.wait(o)
+        self.assertFalse(o.cloud.auto_queue)
+        self.assertFalse(o.cloud.ready)
+        self.assertEqual(o.driver.mode,'hold')
+        o.cloud.client.request_ready.assert_not_called()

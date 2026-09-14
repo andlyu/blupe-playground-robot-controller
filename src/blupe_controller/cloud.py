@@ -1,4 +1,4 @@
-"""Robot-scoped cloud bridge. Each queue handoff requires explicit operator action."""
+"""Robot-scoped cloud bridge with opt-in automatic queue handoff."""
 from .tolerances import near_pose
 import json
 from pathlib import Path
@@ -21,6 +21,9 @@ class CloudBridge:
         self.step = 0
         self.pending = False
         self.generation = 0
+        self.auto_queue = False
+        self.returning_home = False
+        self.on_session_complete = None
         self.client = SessionApiSimClient(self, config['api'].replace('https://','wss://',1)+'/v1/jetsons/connect',
                                          config['robot_id'], Path(config['token_file']))
 
@@ -33,7 +36,9 @@ class CloudBridge:
 
     def pause(self):
         with self.lock:
-            owned = self.ready or self.lease is not None
+            owned = self.ready or self.lease is not None or self.returning_home
+            self.auto_queue = False
+            self.returning_home = False
             self.ready = False
             self.generation += 1
             self.pending = False
@@ -41,26 +46,43 @@ class CloudBridge:
             if owned:
                 self.driver.hold()
 
-    def authorize(self):
+    def check_admission(self):
+        state = self.driver.state()
+        home = self.poses.get('home')
+        if state['mode'] != 'active' or not self.near(state, home['joints_deg'], home['gripper']):
+            raise ValueError('Enable the arm at its captured home before accepting a task')
+        port = self.config['settings'].get('camera_port',8089)
+        with urlopen(f'http://127.0.0.1:{port}/status',timeout=2) as response:
+            if not json.load(response).get('ok'):
+                raise ValueError('Camera must be fresh before accepting a task')
+
+    def authorize(self, auto_queue=False):
         with self.lock:
-            if not self.connected or self.lease or self.ready:
+            if not self.connected or self.lease or self.ready or self.pending or self.returning_home:
                 raise ValueError('Cloud must be connected and idle')
-            state = self.driver.state()
-            home = self.poses.get('home')
-            if state['mode'] != 'active' or not self.near(state, home['joints_deg'], home['gripper']):
-                raise ValueError('Enable the arm at its captured home before accepting a task')
-            port = self.config['settings'].get('camera_port',8089)
-            with urlopen(f'http://127.0.0.1:{port}/status',timeout=2) as response:
-                if not json.load(response).get('ok'):
-                    raise ValueError('Camera must be fresh before accepting a task')
+            self.check_admission()
+            self.auto_queue = auto_queue
             self.ready = True
             self.client.request_ready()
-        return {'queue_ready':True}
+        return {'queue_ready':True, 'auto_queue':self.auto_queue}
+
+    def finish_return_home(self):
+        with self.lock:
+            if not self.auto_queue or not self.returning_home:
+                return
+            self.returning_home = False
+            try:
+                self.authorize(auto_queue=True)
+            except Exception as error:
+                self.error = str(error)
+                self.pause()
+                self.driver.hold()
 
     def status(self):
         with self.lock:
             return {'connected':self.connected,'queue_ready':self.ready,'session_active':self.lease is not None,
-                    'command_active':self.pending,'error':self.error}
+                    'command_active':self.pending,'error':self.error,
+                    'auto_queue':self.auto_queue,'returning_home':self.returning_home}
 
     def api_connection_changed(self, connected, error=None):
         with self.lock:
@@ -97,6 +119,12 @@ class CloudBridge:
                 return None
             lease = {key:payload.get(key) for key in ('session_id','episode_id','lease_id')}
             if not all(isinstance(v,str) and v for v in lease.values()):
+                return None
+            try:
+                self.check_admission()
+            except Exception as error:
+                self.error = str(error)
+                self.pause()
                 return None
             self.lease = lease
             self.ready = False
@@ -212,7 +240,23 @@ class CloudBridge:
 
     def api_handle_stop(self, payload):
         with self.lock:
-            if self.lease and all(payload.get(k)==v for k,v in self.lease.items()):
+            if not self.lease or not all(payload.get(k)==v for k,v in self.lease.items()):
+                return
+            if (payload.get('reason') != 'policy_complete' or not self.auto_queue
+                    or self.pending or self.driver.state()['mode'] != 'active'
+                    or self.on_session_complete is None):
+                self.pause()
+                return
+            self.generation += 1
+            self.lease = None
+            self.ready = False
+            self.returning_home = True
+        # Never acquire the operator lock while holding the bridge lock.
+        try:
+            self.on_session_complete()
+        except Exception as error:
+            with self.lock:
+                self.error = str(error)
                 self.pause()
 
     def api_heartbeat_payload(self):
