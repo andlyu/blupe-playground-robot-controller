@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from .driver import RobotDriver
+from .cloud import CloudBridge
 from .tolerances import near_pose
 from .poses import PoseStore
 
@@ -38,7 +39,7 @@ class Operator:
                 'zero_captured':'zero' in self.poses.poses, 'saved_poses':self.poses.poses,
                 'cloud_execution':self.cloud.status() if self.cloud else 'not connected'}
 
-    def start_pose(self, pose):
+    def start_pose(self, pose, on_complete=None):
         target = list(pose['joints_deg'])
         grip = pose['gripper']
         self.driver._validate_target(target, grip)
@@ -50,6 +51,7 @@ class Operator:
         self.motion_error = ''
 
         def run():
+            completed = False
             start = last_progress = time.monotonic()
             best = float('inf')
             settled = None
@@ -69,6 +71,7 @@ class Operator:
                         if near_pose(state, target, grip):
                             settled = settled or now
                             if now-settled >= 0.3:
+                                completed = True
                                 return
                         else:
                             settled = None
@@ -100,23 +103,39 @@ class Operator:
                 with self.lock:
                     if self.motion is cancel:
                         self.motion = None
+                    if on_complete:
+                        if completed and not cancel.is_set():
+                            on_complete()
+                        else:
+                            self.cloud.pause()
         threading.Thread(target=run, daemon=True).start()
         return {'manual_motion':True}
+
+    def return_home_for_queue(self):
+        with self.lock, self.cloud.lock:
+            if not self.cloud.auto_queue or not self.cloud.returning_home:
+                return
+            if self.motion is not None:
+                raise ValueError('Another pose movement is running')
+            return self.start_pose(self.poses.get('home'), self.cloud.finish_return_home)
 
     def action(self, payload):
         with self.lock:
             action = payload.get('action')
-            if action == 'hold' and self.motion is not None:
+            if action in ('hold', 'cloud_pause') and self.motion is not None:
                 self.motion.set()
             elif self.motion is not None:
                 raise ValueError('Stop the current pose movement first')
-            if action == 'cloud_ready':
+            if action in ('cloud_ready', 'cloud_autoqueue'):
                 if not self.cloud: raise ValueError('Cloud is not configured')
-                return self.cloud.authorize()
+                return self.cloud.authorize(auto_queue=action == 'cloud_autoqueue')
             if action == 'cloud_pause':
                 if self.cloud: self.cloud.pause()
+                if self.motion is not None: self.driver.hold()
                 return {'queue_ready':False}
-            if self.cloud and (self.cloud.ready or self.cloud.lease):
+            if action == 'hold' and self.cloud:
+                self.cloud.pause()
+            if self.cloud and (self.cloud.ready or self.cloud.lease or self.cloud.auto_queue):
                 if action != 'hold': raise ValueError('Pause cloud control before using manual controls')
                 self.cloud.pause()
             if action == 'enable':
@@ -210,6 +229,7 @@ def serve(driver, config):
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     if config.get('settings', {}).get('cloud_enabled'):
         operator.cloud = CloudBridge(driver, config, operator.poses)
+        operator.cloud.on_session_complete = operator.return_home_for_queue
         operator.cloud.start()
     print(f'SO101 operator: http://127.0.0.1:{port}/ — read-only until explicitly enabled', flush=True)
     try:
