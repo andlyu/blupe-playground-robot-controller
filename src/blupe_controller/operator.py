@@ -9,7 +9,8 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from .driver import RobotDriver
-from .tolerances import near_pose
+from .tolerances import near_pose, gripper_error, gripper_step
+from .cloud import CloudBridge
 from .poses import PoseStore
 
 from .operator_page import PAGE
@@ -30,7 +31,7 @@ class Operator:
         state = self.driver.state()
         def at_pose(name):
             pose = self.poses.poses.get(name)
-            return bool(pose and near_pose(state, pose['joints_deg'], pose['gripper']))
+            return bool(pose and near_pose(state, pose['joints_deg'], pose['gripper'], getattr(self.driver, 'joint_tolerance_deg', 5.0)))
         return {**state, 'at_home':at_pose('home'), 'at_zero':at_pose('zero'),
                 'robot_id':self.config['robot_id'],
                 'manual_motion':self.motion is not None, 'manual_motion_error':self.motion_error,
@@ -64,9 +65,9 @@ class Operator:
                         if state['mode'] != 'active':
                             raise ValueError('Movement interrupted by controller state')
                         current = state['joints_deg']
-                        error = max([abs(a-b) for a,b in zip(target,current)] + [abs(grip-state['gripper'])*100])
+                        error = max([abs(a-b) for a,b in zip(target,current)] + [gripper_error(grip,state['gripper'])*100])
                         now = time.monotonic()
-                        if near_pose(state, target, grip):
+                        if near_pose(state, target, grip, getattr(self.driver, 'joint_tolerance_deg', 5.0)):
                             settled = settled or now
                             if now-settled >= 0.3:
                                 return
@@ -82,12 +83,12 @@ class Operator:
                         step = lambda a,b,limit: b+max(-limit,min(limit,a-b))
                         commanded = [step(step(a,b,1.0),c,5.0)
                                      for a,b,c in zip(target,commanded,current)]
-                        commanded_grip = step(step(grip,commanded_grip,0.01),state['gripper'],0.05)
+                        commanded_grip = gripper_step(gripper_step(grip,commanded_grip,0.01),state['gripper'],0.05)
                         result = self.driver.move(commanded, commanded_grip)
                         sent = (result or {}).get('sent_action')
                         if sent:
                             commanded = [sent[name+'.pos'] for name in self.driver.joint_names]
-                            commanded_grip = sent['gripper.pos']/100
+                            commanded_grip = ([sent[side+'_gripper.pos']/100 for side in ('left','right')] if isinstance(grip,list) else sent['gripper.pos']/getattr(self.driver, 'gripper_action_scale', 100))
 
             except Exception as error:
                 with self.lock:
@@ -103,26 +104,47 @@ class Operator:
         threading.Thread(target=run, daemon=True).start()
         return {'manual_motion':True}
 
+    def return_home_for_queue(self, generation):
+        # Never acquire the operator lock while holding the cloud lock.
+        with self.lock:
+            if generation != self.cloud.generation or not self.cloud.auto_queue:
+                return
+            self.start_pose(self.poses.get('home'))
+        while True:
+            time.sleep(.1)
+            with self.lock:
+                if generation != self.cloud.generation or not self.cloud.auto_queue:
+                    if self.motion is not None: self.motion.set()
+                    return
+                if self.motion is None:
+                    if self.motion_error: raise ValueError(self.motion_error)
+                    return
+
     def action(self, payload):
         with self.lock:
             action = payload.get('action')
-            if action == 'hold' and self.motion is not None:
+            if (action in ('hold', 'cloud_pause') or (action == 'auto_queue' and payload.get('enabled') is False)) and self.motion is not None:
                 self.motion.set()
             elif self.motion is not None:
                 raise ValueError('Stop the current pose movement first')
+            if action == 'auto_queue':
+                if not self.cloud: raise ValueError('Cloud is not configured')
+                return self.cloud.set_auto_queue(payload.get('enabled'))
             if action == 'cloud_ready':
                 if not self.cloud: raise ValueError('Cloud is not configured')
                 return self.cloud.authorize()
             if action == 'cloud_pause':
                 if self.cloud: self.cloud.pause()
                 return {'queue_ready':False}
-            if self.cloud and (self.cloud.ready or self.cloud.lease):
+            if self.cloud and (self.cloud.ready or self.cloud.lease or self.cloud.auto_queue):
                 if action != 'hold': raise ValueError('Pause cloud control before using manual controls')
                 self.cloud.pause()
             if action == 'enable':
                 return self.driver.enable()
             if action == 'hold':
                 return self.driver.hold()
+            if self.config.get('hardware') == 'bimanual_so101' and not self.config['settings'].get('calibrations') and action not in ('hold', 'cloud_pause'):
+                raise ValueError('Calibration is deferred; monitoring only')
             if action in ('capture_home', 'capture_zero'):
                 name = action.removeprefix('capture_')
                 return {name:self.poses.capture(name, self.driver.state())}
@@ -165,8 +187,10 @@ def serve(driver, config):
             path = urlsplit(self.path).path
             try:
                 if path == '/':
-                    return self.respond(200, PAGE.replace('__TICKET__', json.dumps(operator.ticket)).encode(), 'text/html; charset=utf-8')
+                    return self.respond(200, PAGE.replace('SO101', {'makerarm':'MakerMods MakerArm', 'bimanual_so101':'Bimanual SO101'}.get(config.get('hardware'), 'SO101')).replace('__TICKET__', json.dumps(operator.ticket)).encode(), 'text/html; charset=utf-8')
                 if path == '/api/queue':
+                    if not config.get('api'):
+                        return self.respond(200, {'entries':[], 'message':'Local controller; BluPe account connection is not configured.'})
                     with urlopen(config['api'] + '/v1/robots/' + config['robot_id'] + '/queue', timeout=5) as response:
                         data = json.loads(response.read(1000000))
                     return self.respond(200, data)
@@ -210,8 +234,9 @@ def serve(driver, config):
     server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
     if config.get('settings', {}).get('cloud_enabled'):
         operator.cloud = CloudBridge(driver, config, operator.poses)
+        operator.cloud.return_home = operator.return_home_for_queue
         operator.cloud.start()
-    print(f'SO101 operator: http://127.0.0.1:{port}/ — read-only until explicitly enabled', flush=True)
+    print(f'{config.get("hardware", "so101")} operator: http://127.0.0.1:{port}/ — read-only until explicitly enabled', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

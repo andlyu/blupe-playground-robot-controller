@@ -6,6 +6,7 @@ from blupe_controller.so101 import SO101Driver
 
 
 class Driver:
+    joint_names = SO101Driver.joint_names
     _action = staticmethod(SO101Driver._action)
     def __init__(self):
         self.joints=[0]*5;self.gripper=.5;self.moves=[];self.held=False
@@ -75,3 +76,36 @@ def test_home_and_trajectory_share_so101_tolerance():
     assert CloudBridge.near(state,[0.]*5,.1,joint_tolerance_deg=5.)
     state['joints_deg'][0]=5.1
     assert not CloudBridge.near(state,[0.]*5,.1,joint_tolerance_deg=5.)
+
+
+def test_auto_queue_completes_then_homes_and_reauthorizes():
+    case=CloudTests();case.setUp();b=case.bridge
+    b.config['hardware']='bimanual_so101'; b.authorize=Mock()
+    b.set_auto_queue(True);assert b.auto_queue
+    b.lease=case.ids.copy();b.return_home=Mock()
+    with patch('blupe_controller.cloud.threading.Thread') as thread:
+        b.api_handle_stop({**case.ids,'reason':'policy_complete'})
+        thread.return_value.start.assert_called_once()
+    assert b.lease is None and b.auto_queue
+    generation=b.generation;b._next_auto_task(generation)
+    b.return_home.assert_called_once_with(generation)
+    assert b.authorize.call_count==2
+    b.pause();b._next_auto_task(generation)
+    assert b.authorize.call_count==2
+
+
+def test_auto_queue_stops_on_fault_or_user_stop():
+    for reason in ('user_requested','session_timeout','lease_expired'):
+        case=CloudTests();case.setUp();b=case.bridge
+        b.auto_queue=True;b.lease=case.ids.copy();b.return_home=Mock()
+        b.api_handle_stop({**case.ids,'reason':reason})
+        assert not b.auto_queue and not b.ready and b.lease is None
+        assert case.driver.held
+        b.return_home.assert_not_called()
+
+
+def test_auto_queue_failed_admission_does_not_enable():
+    case=CloudTests();case.setUp();b=case.bridge;b.config['hardware']='bimanual_so101'
+    import pytest
+    with pytest.raises(ValueError): b.set_auto_queue(True)
+    assert not b.auto_queue

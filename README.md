@@ -29,12 +29,18 @@ fresh snapshots and local MJPEG. Each new robot still needs its own calibration
 and attended hardware checks.
 See [SO101 setup](docs/SO101.md).
 
+**MakerMods MakerArm developer integration:** SDK control in a separate process,
+six-joint poses, and the shared operator/cloud bridge. Hardware validation and a
+verified motor-to-URDF mapping are still required. See [Jetson setup](docs/MAKERARM.md).
+
+**Bimanual SO101 developer integration:** Two calibrated LeRobot arms, independent grippers, shared cameras, and optional auto-queue with return-home between completed tasks. See [bimanual setup](docs/BIMANUAL-SO101.md).
+
 Installation never starts motors or services.
 
 ## Code layout
 
 One command, `blupe-controller --config <profile.json> run`, selects the runtime
-from the profile's `hardware` field (`yam` or `so101`). Imports are lazy, so SO101
+from the profile's `hardware` field (`yam`, `so101`, `bimanual_so101`, or `makerarm`). Imports are lazy, so SO101
 does not load YAM hardware dependencies and YAM does not load LeRobot.
 
 - `backends/`: runtime selection and robot-specific startup.
@@ -216,10 +222,7 @@ This command forwards the operator console on local port 8096; the existing
 independent hard-off service/tunnel on 8098 remains separately provisioned.
 It neither creates a cloud account nor changes the cloud dashboard deployment.
 
-### SO101 saved pose example
+### Saved pose examples
 
-See [SO101 zero and home targets](examples/so101/README.md) for recorded joint targets and calibration compatibility notes.
-
-### YAM saved pose example
-
-See [YAM zero and home targets](examples/yam/README.md) for the existing dual-arm targets and units.
+- [SO101 zero/home targets and Andrew’s calibration](examples/so101/README.md)
+- [YAM zero/home targets](examples/yam/README.md)

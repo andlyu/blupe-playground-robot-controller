@@ -13,10 +13,13 @@ from .runtime.YAM_control.joint_trajectory import parse_joint_trajectory
 class CloudBridge:
     def __init__(self, driver, config, poses):
         self.driver, self.config, self.poses = driver, config, poses
+        self.near = lambda state, joints, gripper: near_pose(state, joints, gripper, getattr(driver, 'joint_tolerance_deg', 5.0))
         self.lock = threading.RLock()
         self.connected = False
         self.error = ''
         self.ready = False
+        self.auto_queue = False
+        self.return_home = None
         self.lease = None
         self.step = 0
         self.pending = False
@@ -33,7 +36,8 @@ class CloudBridge:
 
     def pause(self):
         with self.lock:
-            owned = self.ready or self.lease is not None
+            owned = self.ready or self.lease is not None or self.auto_queue
+            self.auto_queue = False
             self.ready = False
             self.generation += 1
             self.pending = False
@@ -57,10 +61,36 @@ class CloudBridge:
             self.client.request_ready()
         return {'queue_ready':True}
 
+    def set_auto_queue(self, enabled):
+        if type(enabled) is not bool:
+            raise ValueError('auto_queue must be boolean')
+        with self.lock:
+            if not enabled:
+                self.pause()
+            else:
+                if self.config.get('hardware') != 'bimanual_so101':
+                    raise ValueError('Auto-queue is supported for bimanual SO101')
+                if self.auto_queue: return self.status()
+                self.authorize()
+                self.auto_queue = True
+            return self.status()
+
+    def _next_auto_task(self, generation):
+        try:
+            self.return_home(generation)
+            with self.lock:
+                if generation == self.generation and self.auto_queue:
+                    self.authorize()
+        except Exception as error:
+            with self.lock:
+                if generation == self.generation:
+                    self.error = str(error)
+                    self.pause()
+
     def status(self):
         with self.lock:
             return {'connected':self.connected,'queue_ready':self.ready,'session_active':self.lease is not None,
-                    'command_active':self.pending,'error':self.error}
+                    'command_active':self.pending,'error':self.error,'auto_queue':self.auto_queue}
 
     def api_connection_changed(self, connected, error=None):
         with self.lock:
@@ -78,8 +108,10 @@ class CloudBridge:
         return {'schema_version':1,'type':kind,**(self.lease or {}),**fields}
 
     def image_fields(self, state):
-        return {'observed_at':time.time(),'left_joints_deg':state['joints_deg'],'right_joints_deg':[],
-                'left_gripper':state['gripper'],'right_gripper':None,
+        return {'observed_at':time.time(),'left_joints_deg':state['joints_deg'][:5] if self.config.get('hardware')=='bimanual_so101' else state['joints_deg'],
+                'right_joints_deg':state['joints_deg'][5:] if self.config.get('hardware')=='bimanual_so101' else [],
+                'left_gripper':state['gripper'][0] if isinstance(state['gripper'],list) else state['gripper'],
+                'right_gripper':state['gripper'][1] if isinstance(state['gripper'],list) else None,
                 'images':{role:{'url':f'{self.config["api"]}/v1/robots/{self.config["robot_id"]}/cameras/{role}.jpg'}
                           for role in self.config['cameras']}}
 
@@ -113,8 +145,15 @@ class CloudBridge:
         gripper = self.driver.state()['gripper']
         targets = []
         for point in points:
+            if self.config.get('hardware')=='bimanual_so101':
+                gripper = [point.get(side+'_gripper') if point.get(side+'_gripper') is not None else gripper[i] for i,side in enumerate(('left','right'))]
+                joints = point.get('left_joints_deg',[]) + point.get('right_joints_deg',[])
+                if len(point.get('left_joints_deg',[]))!=5 or len(point.get('right_joints_deg',[]))!=5: raise ValueError('Expected five joints per arm')
+                self.driver._validate_target(joints,gripper)
+                targets.append((joints,gripper))
+                continue
             if point.get('right_joints_deg') != [] or point.get('right_gripper') is not None:
-                raise ValueError('SO101 requires an empty right arm')
+                raise ValueError('Single-arm controller requires an empty right arm')
             if point.get('left_gripper') is not None:
                 gripper = point['left_gripper']
             joints = point.get('left_joints_deg')
@@ -140,7 +179,7 @@ class CloudBridge:
                 self.check(payload)
                 trajectory = parse_joint_trajectory(payload, expected_session_id=self.lease['session_id'],
                     expected_episode_id=self.lease['episode_id'],expected_lease_id=self.lease['lease_id'],
-                    expected_step_id=self.step,joint_counts=(5,0))
+                    expected_step_id=self.step,joint_counts=getattr(self.driver,'joint_counts',(len(self.driver.joint_names),0)))
                 targets = self.targets(payload['waypoints'])
             except ValueError as error:
                 return [self.envelope('trajectory_result',trajectory_id=payload.get('trajectory_id'),status='rejected',reported_at=time.time(),code=str(error))]
@@ -213,7 +252,14 @@ class CloudBridge:
     def api_handle_stop(self, payload):
         with self.lock:
             if self.lease and all(payload.get(k)==v for k,v in self.lease.items()):
-                self.pause()
+                if self.auto_queue and payload.get('reason') == 'policy_complete' and not self.pending and self.return_home:
+                    self.lease = None
+                    self.ready = False
+                    self.generation += 1
+                    generation = self.generation
+                    threading.Thread(target=self._next_auto_task,args=(generation,),daemon=True).start()
+                else:
+                    self.pause()
 
     def api_heartbeat_payload(self):
         with self.lock:

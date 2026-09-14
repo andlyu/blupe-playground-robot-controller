@@ -16,15 +16,21 @@ DEFAULT_CONFIG = Path.home() / '.config/blupe-controller/config.json'
 
 
 def validate(config):
-    if config.get('version') != 1 or config.get('hardware') not in ('yam', 'so101'):
-        raise ValueError('Supported profiles: yam, so101.')
+    if config.get('version') != 1 or config.get('hardware') not in ('yam', 'so101', 'makerarm', 'bimanual_so101'):
+        raise ValueError('Supported profiles: yam, so101, makerarm, bimanual_so101.')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', config.get('robot_id', '')):
         raise ValueError('Invalid robot ID')
+    if config['hardware'] == 'bimanual_so101':
+        from .bimanual_so101 import validate_profile
+        return validate_profile(config)
     origin = urlsplit(config.get('api', ''))
     if origin.scheme != 'https' or not origin.hostname or origin.username or origin.password or origin.path not in ('', '/') or origin.query or origin.fragment:
         raise ValueError('Use an HTTPS API origin with no credentials, path or query')
     if not Path(config.get('token_file', '')).is_absolute():
         raise ValueError('Use an absolute credential-file path')
+    if config['hardware'] == 'makerarm':
+        from .makerarm import validate_profile
+        return validate_profile(config)
     if config['hardware'] == 'so101':
         from .so101 import validate_profile
         from .lerobot_config import resolve
@@ -75,6 +81,11 @@ def setup(args):
 
 
 def doctor(config):
+    if config['hardware'] == 'makerarm':
+        checks = {name: importlib.util.find_spec(module) is not None for name,module in [('maker_arm','maker_arm'),('opencv','cv2'),('websockets','websockets')]}
+        for name, ok in checks.items():
+            print(f'{name}: {"OK" if ok else "MISSING"}')
+        return all(checks.values())
     if config['hardware'] == 'so101':
         checks = {'serial_device': Path(config['settings']['serial_port']).exists(),
                   'lerobot': importlib.util.find_spec('lerobot') is not None,
@@ -186,12 +197,16 @@ def main(argv=None):
             setup(args); return 0
         config = load(args.config)
         if args.command == 'record-pose':
-            if config['hardware'] != 'so101': raise ValueError('Pose recording currently supports SO101')
-            from .so101 import SO101Driver
+            if config['hardware'] == 'makerarm':
+                from .makerarm import MakerArmDriver as PoseDriver
+            elif config['hardware'] == 'so101':
+                from .so101 import SO101Driver as PoseDriver
+            else:
+                raise ValueError('Pose recording supports SO101 and MakerArm')
             from .poses import PoseStore
             store = PoseStore(config)
             if store.path is None: raise ValueError('Use --lerobot-config or configure settings.poses_file for persistent recording')
-            driver = SO101Driver(config).connect()
+            driver = PoseDriver(config).connect()
             try:
                 pose = store.capture(args.name, driver.state())
                 print(json.dumps({'name':args.name, 'path':str(store.path), **pose}, indent=2))
