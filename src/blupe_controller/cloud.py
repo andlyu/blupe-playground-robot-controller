@@ -26,6 +26,7 @@ class CloudBridge:
         self.return_zero = None
         self.parked = False
         self.returning_home = False
+        self.cleanup_phase = None
         self.lease = None
         self.step = 0
         self.recorder = None
@@ -69,6 +70,7 @@ class CloudBridge:
             owned = self.ready or self.lease is not None or self.auto_queue or self.returning_home
             self.auto_queue = False
             self.returning_home = False
+            self.cleanup_phase = None
             self.parked = False
             self.ready = False
             self.generation += 1
@@ -180,10 +182,14 @@ class CloudBridge:
                         if generation != self.generation: return
                         self.error = f'Queue lookup failed: {error}'
             if self.return_zero is not None and not waiting:
+                with self.lock:
+                    if generation != self.generation: return
+                    self.cleanup_phase = 'PARKING_ZERO'
                 self.return_zero(generation)
                 with self.lock:
                     if generation != self.generation: return
                     self.returning_home = False
+                    self.cleanup_phase = None
                     self.parked = True
                 while True:
                     time.sleep(2)
@@ -200,10 +206,14 @@ class CloudBridge:
                 with self.lock:
                     if generation != self.generation or not self.auto_queue: return
                     self.returning_home = True
+            with self.lock:
+                if generation != self.generation: return
+                self.cleanup_phase = 'MOVING_HOME'
             self.return_home(generation)
             with self.lock:
                 if generation == self.generation:
                     self.returning_home = False
+                    self.cleanup_phase = None
                     self.parked = False
                     if self.auto_queue:
                         self.authorize()
@@ -444,6 +454,7 @@ class CloudBridge:
                     # Revoke old waypoints under the same lock used by execute().
                     self.pending = False
                     self.returning_home = True
+                    self.cleanup_phase = 'PREPARING'
                     self.lease = None
                     self.ready = False
                     self.generation += 1
@@ -463,7 +474,17 @@ class CloudBridge:
         with self.lock:
             state = self.driver.state()
             home = self.poses.poses.get('home')
-            return {'schema_version':1,'type':'station_status','source':'hardware','mode':state['mode'],
-                    'queue_ready':self.ready,'settled':not self.pending,
-                    'homed':bool(home and self.near(state,home['joints_deg'],home['gripper'])),
+            homed = bool(home and self.near(state,home['joints_deg'],home['gripper']))
+            # Public readiness describes automatic runs. self.ready remains the
+            # separate authorization gate, including manually authorized sessions.
+            queue_ready = bool(self.connected and self.auto_queue and self.ready and homed
+                               and state['mode'] == 'active' and not state['error']
+                               and not self.pending and not self.returning_home and not self.lease)
+            mode = ('FAULT' if state['mode'] == 'fault' else self.cleanup_phase
+                    or ('EXECUTING' if self.lease else 'READY' if queue_ready else 'STOPPED'))
+            if self.config.get('hardware') not in ('so101', 'bimanual_so101'):
+                mode, queue_ready = state['mode'], self.ready
+            return {'schema_version':1,'type':'station_status','source':'hardware','mode':mode,
+                    'queue_ready':queue_ready,'settled':not self.pending and not self.returning_home,
+                    'homed':homed,
                     **self.image_fields(state),'safety':{'ok':state['mode']!='fault','estop_engaged':False,'reason':state['error'] or None}}
