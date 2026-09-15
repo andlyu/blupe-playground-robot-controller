@@ -20,6 +20,7 @@ class CloudBridge:
         self.lock = threading.RLock()
         self.connected = False
         self.error = ''
+        self.api_error = ''
         self.ready = False
         self.auto_queue = False
         self.return_home = None
@@ -251,6 +252,7 @@ class CloudBridge:
         with self.lock:
             return {'connected':self.connected,'queue_ready':self.ready,'session_active':self.lease is not None,
                     'command_active':self.pending,'error':self.error,'auto_queue':self.auto_queue,
+                    'api_error':self.api_error,
                     'run_duration_s':self.run_duration_s,
                     'run_remaining_s':max(0.,self.run_deadline-time.monotonic()) if self.run_deadline is not None else None,
                     'last_stop_reason':self.last_stop_reason,
@@ -266,6 +268,20 @@ class CloudBridge:
 
     def api_error_received(self, error):
         with self.lock:
+            self.api_error = error
+            try:
+                rejection = json.loads(error)
+            except (TypeError, ValueError):
+                rejection = None
+            if (isinstance(rejection, dict)
+                    and rejection.get('code') == 'invalid_session_state'
+                    and rejection.get('message') == 'session is not active'
+                    and rejection.get('status') == 409):
+                # In-flight reports can be rejected before OR after stop_session.
+                # This response has no lease identity; only the matching Stop
+                # message may revoke a lease, never a late, uncorrelated reply.
+                # Preserve local Home/Zero cleanup and a subsequent run's lease.
+                return
             self.error = error
             self.pause("api_error")
 

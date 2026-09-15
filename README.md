@@ -235,6 +235,11 @@ It neither creates a cloud account nor changes the cloud dashboard deployment.
 
 On macOS or Linux, choose **Enable Auto-queue** from enabled Home or saved Zero, including Zero with torque off. At Zero the arm waits for work, then enables and moves Home before accepting it. Visitor Stop, time expiry, and completion keep auto-queue enabled. If work is queued, the arms return to saved Home before accepting it. Otherwise they move to saved Zero and verify torque off; auto-queue checks for new work every two seconds, then enables and returns Home before accepting it. Operator Hold/Pause, disconnect, and faults cancel auto-queue. Both saved poses are required. It is off after startup; launching the controller never enables motion automatically. Update an existing checkout with `git pull` and restart its controller process.
 
+An in-flight session report can receive `409: session is not active` as a run
+ends. That specific response is recorded in `cloud_execution.api_error` without
+cancelling Home/Zero cleanup or the next run. The matching Stop message controls
+the run lifecycle. Other API errors retain their existing pause behavior.
+
 ## SO101 recording and uploads
 
 Single and bimanual SO101 can record cloud sessions and publish native data,
