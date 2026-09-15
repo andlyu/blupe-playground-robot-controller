@@ -40,6 +40,7 @@ class MotionTests(unittest.TestCase):
 
     def test_tracking_deadband_does_not_pin_target(self):
         o=self.operator()
+        o.driver.joint_tolerance_deg = .1  # Exercise tracking rather than early settling.
         def delayed_move(q,g):
             o.driver.sent.append((list(q),g))
             if max(abs(a-b) for a,b in zip(q,o.driver.q)) >= 1.5:
