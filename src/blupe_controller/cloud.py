@@ -156,6 +156,27 @@ class CloudBridge:
                 if self.config.get('hardware') not in ('so101', 'bimanual_so101'):
                     raise ValueError('Auto-queue is supported for SO101 controllers')
                 if self.auto_queue: return self.status()
+                state = self.driver.state()
+                zero = self.poses.get('zero') if self.return_zero is not None else None
+                at_zero = bool(zero and self.near(state, zero['joints_deg'], zero['gripper']))
+                if at_zero and state['mode'] in ('active', 'readonly'):
+                    if not self.connected or self.lease or self.ready or self.returning_home or self.pending:
+                        raise ValueError('Cloud must be connected and idle')
+                    if state.get('error'):
+                        raise ValueError('Resolve the controller fault before enabling auto-queue')
+                    if self.return_home is None:
+                        raise ValueError('Home movement must be configured before enabling auto-queue')
+                    home = self.poses.get('home')
+                    self.driver._validate_target(home['joints_deg'], home['gripper'])
+                    # Zero arms may stay torque-off until work arrives. Admission
+                    # remains disarmed until measured Home and camera checks pass.
+                    self.error = ''
+                    self.auto_queue = True
+                    self.parked = state['mode'] == 'readonly'
+                    self.returning_home = not self.parked
+                    self.generation += 1
+                    threading.Thread(target=self._next_auto_task, args=(self.generation,), daemon=True).start()
+                    return self.status()
                 if self.return_zero is not None:
                     self.poses.get('zero')
                 self.authorize()
@@ -184,8 +205,10 @@ class CloudBridge:
             if self.return_zero is not None and not waiting:
                 with self.lock:
                     if generation != self.generation: return
-                    self.cleanup_phase = 'PARKING_ZERO'
-                self.return_zero(generation)
+                    already_parked = self.parked
+                    self.cleanup_phase = None if already_parked else 'PARKING_ZERO'
+                if not already_parked:
+                    self.return_zero(generation)
                 with self.lock:
                     if generation != self.generation: return
                     self.returning_home = False
@@ -208,6 +231,7 @@ class CloudBridge:
                     self.returning_home = True
             with self.lock:
                 if generation != self.generation: return
+                self.returning_home = True
                 self.cleanup_phase = 'MOVING_HOME'
             self.return_home(generation)
             with self.lock:
