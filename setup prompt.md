@@ -9,7 +9,7 @@ First. Get user necessary information. This should happen through discussion wit
 Before we laucnh the user needs to provide (or guide us in finding):
 1. **Calibration:** Provide the calibration file for each arm. - Specifying which arm is which, and whcih cameras are which
 4. **Zero and home:** Agree on the zero and home poses to use.
-5. **Operator account:** Specify which account(s) should have access — here, `andrew2` and `isaac`.
+5. **Operator account:** Specify which account(s) should have access to the robot.
 4. **Arm assignment (if bimanual):** Arm A is left; Arm B is right.
 5. **Camera assignment (if multiple):** Swap the two wrist feeds.
 6. **Mounting layout (if bimanual):** User confirmed the standard XLeRobot layout: arm bases 26.6 cm apart, at equal height and with the same orientation. Use the mounting transforms from [XLeRobot's combined URDF](https://github.com/Vector-Wangel/XLeRobot/blob/main/simulation/Maniskill/assets/xlerobot/xlerobot.urdf) for arm-to-arm collision checking.
