@@ -1,5 +1,5 @@
 """Exercise controller policy and the installed LeRobot packet retry loop; no IO."""
-from unittest.mock import Mock
+from unittest.mock import Mock, patch, call
 import pytest
 from blupe_controller.so101 import retry_position_reads, NAMES
 import test_so101
@@ -9,10 +9,16 @@ def test_policy_only_changes_position_reads_and_preserves_arguments():
     bus=Mock();original=bus.sync_read;write=bus.sync_write
     retry_position_reads(bus)
     bus.sync_read('Present_Position', ['wrist_roll'], normalize=False)
-    original.assert_called_once_with('Present_Position',['wrist_roll'],normalize=False,num_retry=3)
+    original.assert_called_once_with('Present_Position',['wrist_roll'],normalize=False,num_retry=0)
     bus.sync_read('Torque_Enable',normalize=False,num_retry=0)
     assert original.call_args.kwargs=={'normalize':False,'num_retry':0}
     assert bus.sync_write is write
+
+
+@pytest.fixture(autouse=True)
+def retry_sleep():
+    with patch('blupe_controller.so101.time.sleep') as sleep:
+        yield sleep
 
 
 @pytest.fixture
@@ -119,3 +125,30 @@ def test_exhausted_pre_command_read_does_not_write_a_target(fixture):
     assert bus.sync_reader.txRxPacket.call_count==4
     bus.sync_write.assert_not_called()
     assert fixture.driver.mode=='fault'
+
+
+@pytest.mark.parametrize('failures',[0,1,2,3,4])
+def test_delay_occurs_only_between_failed_attempts(failures,retry_sleep):
+    bus=Mock();original=bus.sync_read;events=[]
+    def read(*args,**kwargs):
+        events.append('read')
+        if events.count('read')<=failures:raise ConnectionError('no response')
+        return {'gripper':.5}
+    original.side_effect=read
+    retry_sleep.side_effect=lambda seconds:events.append(('sleep',seconds))
+    retry_position_reads(bus)
+    if failures==4:
+        with pytest.raises(ConnectionError,match='4 tries'):bus.sync_read('Present_Position')
+    else:
+        assert bus.sync_read('Present_Position')=={'gripper':.5}
+    attempts=min(failures+1,4)
+    assert events==['read']+sum(([('sleep',.5),'read'] for _ in range(attempts-1)),[])
+    assert retry_sleep.call_count==min(failures,3)
+    assert all(c.kwargs['num_retry']==0 for c in original.call_args_list)
+
+
+def test_other_errors_fail_without_retry_or_delay(retry_sleep):
+    bus=Mock();original=bus.sync_read;original.side_effect=ValueError('invalid value')
+    retry_position_reads(bus)
+    with pytest.raises(ValueError):bus.sync_read('Present_Position')
+    original.assert_called_once();retry_sleep.assert_not_called()

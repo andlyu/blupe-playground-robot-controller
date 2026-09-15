@@ -8,15 +8,17 @@ import json
 import math
 from pathlib import Path
 import threading
+import time
 
 NAMES = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper')
 
 
 POSITION_READ_RETRIES = 3
+POSITION_READ_RETRY_DELAY_S = 0.5
 
 
 def retry_position_reads(bus):
-    """Use the SDK's packet retries for feedback and pre-command safety reads.
+    """Retry failed position reads with a bounded pause before each retry.
 
     This is per robot bus; writes and other registers keep their original policy.
     Failed packets never supply cached positions or re-send a motion command.
@@ -25,9 +27,20 @@ def retry_position_reads(bus):
 
     @wraps(original)
     def sync_read(data_name, *args, **kwargs):
-        if data_name == 'Present_Position':
-            kwargs['num_retry'] = POSITION_READ_RETRIES
-        return original(data_name, *args, **kwargs)
+        if data_name != 'Present_Position':
+            return original(data_name, *args, **kwargs)
+        # Disable SDK-internal immediate retries: each call is exactly one
+        # packet attempt, with our delay only between failed attempts.
+        kwargs['num_retry'] = 0
+        for attempt in range(POSITION_READ_RETRIES + 1):
+            try:
+                return original(data_name, *args, **kwargs)
+            except ConnectionError as error:
+                if attempt == POSITION_READ_RETRIES:
+                    raise ConnectionError(
+                        f'Position read failed after {attempt + 1} tries: {error}'
+                    ) from error
+                time.sleep(POSITION_READ_RETRY_DELAY_S)
 
     bus.sync_read = sync_read
 
