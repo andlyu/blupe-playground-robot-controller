@@ -29,12 +29,15 @@ class CloudTests(unittest.TestCase):
             self.bridge=CloudBridge(self.driver,config,self.poses)
         self.ids={'session_id':'session','episode_id':'episode','lease_id':'lease'}
 
+    def tearDown(self):
+        self.bridge.pause()
+
     def prepare(self):
         self.bridge.ready=True
-        return self.bridge.api_prepare_session(self.ids)
+        return self.bridge.api_prepare_session({**self.ids,'run_duration_s':180})
 
     def test_never_accepts_session_until_authorized(self):
-        self.assertIsNone(self.bridge.api_prepare_session(self.ids))
+        self.assertIsNone(self.bridge.api_prepare_session({**self.ids,'run_duration_s':180}))
         self.assertEqual(self.driver.moves,[])
         first=self.prepare()
         self.assertEqual(first['right_joints_deg'],[])

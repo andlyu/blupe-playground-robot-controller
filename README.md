@@ -241,3 +241,20 @@ Single and bimanual SO101 can record cloud sessions and publish native data,
 Past runs videos and LeRobot visualizer exports. See the [Mac setup and cloud
 publisher guide](docs/SO101-RECORDING.md). Recording and transfer must be explicitly
 configured; pulling main alone does not enable uploads.
+
+### Local SO101 run deadline
+
+The controller requires a finite, positive `run_duration_s` in the Session API
+`prepare_session` handoff. A monotonic watchdog starts when it accepts the session,
+including time spent waiting for the model. At expiry it revokes the lease,
+cancels command execution, disables auto-queue, and calls the existing Hold
+behavior. It does not return home or release torque. Late commands are rejected;
+a new session needs normal operator authorization.
+
+The controller reports `policy_runtime_timeout` through the existing safety-abort
+protocol (the API classifies it as `timed_out`) and finalizes the recording with
+that outcome. Status exposes `run_duration_s`, `run_remaining_s`, and
+`last_stop_reason`; handoff logs show the duration actually received. Missing or
+invalid durations fail closed. The local watchdog does not depend on cloud
+connectivity, but Python scheduling and an in-flight hardware IO call can delay
+Hold; this is not a hard real-time or hardware emergency-stop mechanism.

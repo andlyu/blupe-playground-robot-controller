@@ -3,6 +3,7 @@ from .tolerances import near_pose
 import json
 import copy
 import math
+import logging
 from pathlib import Path
 import threading
 import time
@@ -29,6 +30,12 @@ class CloudBridge:
         self.recorded_command = None
         self.recorded_snapshot = (None, None, 0.)
         self.pending = False
+        self.active_command = None
+        self.run_deadline = None
+        self.run_duration_s = None
+        self.deadline_cancel = None
+        self.timed_out_lease = None
+        self.last_stop_reason = ''
         self.generation = 0
         self.client = SessionApiSimClient(self, config['api'].replace('https://','wss://',1)+'/v1/jetsons/connect',
                                          config['robot_id'], Path(config['token_file']))
@@ -51,7 +58,11 @@ class CloudBridge:
 
     def pause(self, reason="operator_paused"):
         with self.lock:
+            if self.ready or self.lease is not None or self.auto_queue or not self.last_stop_reason:
+                self.last_stop_reason = reason
+            self.cancel_deadline()
             self.finish_recording(reason)
+            self.active_command = None
             owned = self.ready or self.lease is not None or self.auto_queue
             self.auto_queue = False
             self.ready = False
@@ -60,6 +71,56 @@ class CloudBridge:
             self.lease = None
             if owned:
                 self.driver.hold()
+
+    def cancel_deadline(self):
+        if self.deadline_cancel is not None:
+            self.deadline_cancel.set()
+        self.deadline_cancel = None
+        self.run_deadline = None
+
+    def watch_deadline(self, generation, deadline, cancel):
+        # A local watchdog: no model reply, heartbeat, or network IO is needed.
+        while not cancel.wait(max(0., deadline-time.monotonic())):
+            with self.lock:
+                if generation != self.generation or self.lease is None:
+                    return
+                if self.expire_run():
+                    return
+
+    def expire_run(self):
+        # Caller holds the bridge lock; command dispatch uses this same gate.
+        if self.lease is None or self.run_deadline is None or time.monotonic() < self.run_deadline:
+            return False
+        reason = 'policy_runtime_timeout'
+        lease = dict(self.lease)
+        duration = self.run_duration_s
+        active = self.active_command
+        self.timed_out_lease = lease
+        self.error = reason
+        try:
+            # Revoke first, cancel workers, finalize recording, then existing Hold.
+            self.pause(reason)
+        except Exception as error:
+            self.error = f'{reason}: hold failed: {error}'
+            logging.getLogger(__name__).exception('Runtime timeout Hold failed for %s', lease['session_id'])
+        logging.getLogger(__name__).warning('SO101 runtime timeout robot=%s session=%s run_duration_s=%s',
+                                            self.config['robot_id'], lease['session_id'], duration)
+        if active is not None:
+            payload, trajectory = active
+            result = (dict(type='trajectory_result', trajectory_id=payload['trajectory_id'],
+                           status='aborted', reported_at=time.time(), code=reason) if trajectory else
+                      dict(type='action_result', step_id=payload['step_id'], command_id=payload['command_id'],
+                           status='rejected', reason=reason))
+            self.client.send({'schema_version':1, **lease, **result})
+        self.client.send({'schema_version':1, 'type':'safety_abort', **lease, 'code':reason,
+                          'message':'Controller local run duration expired; Hold requested',
+                          'observed_at':time.time(), 'details':{'run_duration_s':duration}})
+        return True
+
+    def rejection(self, payload, kind, **fields):
+        # A late command must never be attributed to the subsequent live lease.
+        return {'schema_version':1, 'type':kind,
+                **{k:payload.get(k) for k in ('session_id','episode_id','lease_id')}, **fields}
 
     def authorize(self):
         with self.lock:
@@ -107,6 +168,9 @@ class CloudBridge:
         with self.lock:
             return {'connected':self.connected,'queue_ready':self.ready,'session_active':self.lease is not None,
                     'command_active':self.pending,'error':self.error,'auto_queue':self.auto_queue,
+                    'run_duration_s':self.run_duration_s,
+                    'run_remaining_s':max(0.,self.run_deadline-time.monotonic()) if self.run_deadline is not None else None,
+                    'last_stop_reason':self.last_stop_reason,
                     'recording':dict(self.recorder.meta) if self.recorder else None, 'recording_error':self.recording_error}
 
     def api_connection_changed(self, connected, error=None):
@@ -148,7 +212,26 @@ class CloudBridge:
             lease = {key:payload.get(key) for key in ('session_id','episode_id','lease_id')}
             if not all(isinstance(v,str) and v for v in lease.values()):
                 return None
+            if self.timed_out_lease and lease['session_id'] == self.timed_out_lease['session_id']:
+                return None
+            duration = payload.get('run_duration_s')
+            logging.getLogger(__name__).warning('SO101 handoff robot=%s session=%s run_duration_s=%r',
+                                                self.config['robot_id'], lease['session_id'], duration)
+            if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
+                self.error = 'invalid_run_duration'
+                self.pause('invalid_run_duration')
+                self.client.send({'schema_version':1, 'type':'safety_abort', **lease,
+                                  'code':'invalid_run_duration', 'message':'A finite positive run_duration_s is required'})
+                return None
             self.lease = lease
+            self.run_duration_s = float(duration)
+            self.run_deadline = time.monotonic()+duration
+            self.deadline_cancel = threading.Event()
+            self.last_stop_reason = ''
+            self.error = ''
+            threading.Thread(target=self.watch_deadline,
+                             args=(self.generation,self.run_deadline,self.deadline_cancel),
+                             daemon=True, name='so101-run-deadline').start()
             self.ready = False
             self.step = 0
             observation = self.observation()
@@ -158,6 +241,7 @@ class CloudBridge:
                     from .recording import EpisodeRecorder
                     self.recorder = EpisodeRecorder(root, self.config, lease['episode_id'], payload.get('task'),
                                                     self.driver.joint_names, lambda: self.recorded_snapshot)
+                    self.recorder.meta['run_duration_s'] = self.run_duration_s
                     self.recorder.start()
                     self.recording_error = ''
                 except Exception as error:
@@ -166,6 +250,9 @@ class CloudBridge:
             return observation
 
     def check(self, payload):
+        self.expire_run()
+        if self.timed_out_lease and all(payload.get(k)==v for k,v in self.timed_out_lease.items()):
+            raise ValueError('policy_runtime_timeout')
         if not self.lease or any(payload.get(k)!=v for k,v in self.lease.items()):
             raise ValueError('lease_mismatch')
         if self.pending or self.driver.state()['mode'] != 'active':
@@ -199,7 +286,7 @@ class CloudBridge:
                     raise ValueError('stale_or_invalid_command')
                 targets = self.targets([payload])
             except ValueError as error:
-                return [self.envelope('action_result',step_id=payload.get('step_id'),command_id=payload.get('command_id'),status='rejected',reason=str(error))]
+                return [self.rejection(payload,'action_result',step_id=payload.get('step_id'),command_id=payload.get('command_id'),status='rejected',reason=str(error))]
             self.launch(payload,targets,False)
             return []
 
@@ -212,7 +299,7 @@ class CloudBridge:
                     expected_step_id=self.step,joint_counts=getattr(self.driver,'joint_counts',(len(self.driver.joint_names),0)))
                 targets = self.targets(payload['waypoints'])
             except ValueError as error:
-                return [self.envelope('trajectory_result',trajectory_id=payload.get('trajectory_id'),status='rejected',reported_at=time.time(),code=str(error))]
+                return [self.rejection(payload,'trajectory_result',trajectory_id=payload.get('trajectory_id'),status='rejected',reported_at=time.time(),code=str(error))]
             # Send accepted before the worker can send progress/completion.
             self.client.send(self.envelope('trajectory_result',trajectory_id=trajectory.trajectory_id,status='accepted',reported_at=time.time()))
             self.launch(payload,targets,True)
@@ -220,6 +307,7 @@ class CloudBridge:
 
     def launch(self, payload, targets, trajectory):
         self.pending = True
+        self.active_command = (dict(payload), trajectory)
         generation = self.generation
         threading.Thread(target=self.execute,args=(payload,targets,trajectory,generation),daemon=True).start()
 
@@ -230,7 +318,7 @@ class CloudBridge:
                 while time.monotonic()<start+index*.1:
                     time.sleep(.01)
                 with self.lock:
-                    if generation!=self.generation:
+                    if generation!=self.generation or self.expire_run():
                         return
                     if time.monotonic()>start+index*.1+.5:
                         raise ValueError('trajectory_dispatch_stalled')
@@ -249,7 +337,7 @@ class CloudBridge:
             settled = None
             while True:
                 with self.lock:
-                    if generation!=self.generation:
+                    if generation!=self.generation or self.expire_run():
                         return
                     state = self.driver.state()
                     self.cache_recording_state(state)
@@ -264,10 +352,11 @@ class CloudBridge:
                         raise ValueError('joint_settle_timeout')
                 time.sleep(.05)
             with self.lock:
-                if generation!=self.generation:
+                if generation!=self.generation or self.expire_run():
                     return
                 self.step += len(targets)
                 self.pending = False
+                self.active_command = None
                 self.client.send(self.observation())
                 if trajectory:
                     self.client.send(self.envelope('trajectory_result',trajectory_id=payload['trajectory_id'],status='completed',reported_at=time.time()))
@@ -275,7 +364,7 @@ class CloudBridge:
                     self.client.send(self.envelope('action_result',step_id=payload['step_id'],command_id=payload['command_id'],status='executed',reason='settled'))
         except Exception as error:
             with self.lock:
-                if generation!=self.generation:
+                if generation!=self.generation or self.expire_run():
                     return
                 self.error = str(error)
                 if trajectory:
@@ -286,7 +375,10 @@ class CloudBridge:
 
     def api_handle_stop(self, payload):
         with self.lock:
+            if self.expire_run():
+                return
             if self.lease and all(payload.get(k)==v for k,v in self.lease.items()):
+                self.cancel_deadline()
                 self.finish_recording(payload.get('reason') or 'session_stopped')
                 if self.auto_queue and payload.get('reason') == 'policy_complete' and not self.pending and self.return_home:
                     self.lease = None
@@ -295,7 +387,7 @@ class CloudBridge:
                     generation = self.generation
                     threading.Thread(target=self._next_auto_task,args=(generation,),daemon=True).start()
                 else:
-                    self.pause()
+                    self.pause(payload.get('reason') or 'session_stopped')
 
     def api_heartbeat_payload(self):
         with self.lock:

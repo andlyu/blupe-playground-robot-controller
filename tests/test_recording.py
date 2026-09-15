@@ -38,7 +38,7 @@ def test_cloud_recording_starts_only_on_assignment_and_finishes_on_disconnect(tm
     poses=Mock();poses.poses={}
     with patch('blupe_controller.cloud.SessionApiSimClient'), patch('blupe_controller.recording.EpisodeRecorder') as factory:
         bridge=CloudBridge(driver,config,poses)
-        ids={'session_id':'s','episode_id':'ep_test','lease_id':'l','task':'Move block'}
+        ids={'session_id':'s','episode_id':'ep_test','lease_id':'l','task':'Move block','run_duration_s':180}
         assert bridge.api_prepare_session(ids) is None
         factory.assert_not_called()
         bridge.ready=True;bridge.api_prepare_session(ids)
