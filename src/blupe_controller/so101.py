@@ -3,12 +3,33 @@
 LeRobot owns protocol handling, normalization and relative-target clipping.
 No native worker, interpolation thread or independent watchdog is used.
 """
+from functools import wraps
 import json
 import math
 from pathlib import Path
 import threading
 
 NAMES = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll', 'gripper')
+
+
+POSITION_READ_RETRIES = 3
+
+
+def retry_position_reads(bus):
+    """Use the SDK's packet retries for feedback and pre-command safety reads.
+
+    This is per robot bus; writes and other registers keep their original policy.
+    Failed packets never supply cached positions or re-send a motion command.
+    """
+    original = bus.sync_read
+
+    @wraps(original)
+    def sync_read(data_name, *args, **kwargs):
+        if data_name == 'Present_Position':
+            kwargs['num_retry'] = POSITION_READ_RETRIES
+        return original(data_name, *args, **kwargs)
+
+    bus.sync_read = sync_read
 
 
 def calibration(path):
@@ -95,6 +116,7 @@ class SO101Driver:
         if self.robot is not None:
             raise ValueError('Already connected')
         self.robot = make_robot(self.config)
+        retry_position_reads(self.robot.bus)
         try:
             # SOFollower.connect() also configures registers and toggles torque.
             # Use its bus's read-only connection for an already configured arm.
