@@ -153,6 +153,15 @@ class BimanualSO101Driver:
                 raise
             return self.state()
 
+    def disable(self):
+        with self.lock:
+            errors = []
+            for driver in self.drivers:
+                try: driver.disable()
+                except Exception as error: errors.append(str(error))
+            if errors: raise ValueError('; '.join(errors))
+            return self.state()
+
     def move(self, joints, grippers):
         with self.lock:
             self._validate_target(joints,grippers)

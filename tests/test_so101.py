@@ -46,6 +46,25 @@ class LeRobotTests(unittest.TestCase):
         self.assertEqual(result['sent_action']['gripper.pos'],60)
         self.assertEqual(result['sent_action']['wrist_roll.pos'],5)
 
+    def test_disable_verifies_every_motor_and_requires_reenable(self):
+        self.driver.connect()
+        self.driver.enable()
+        self.driver.disable()
+        self.robot.bus.disable_torque.assert_called_once()
+        for name in NAMES:
+            self.robot.bus.read.assert_any_call('Torque_Enable', name, normalize=False)
+        self.assertEqual(self.driver.mode, 'readonly')
+        with self.assertRaises(ValueError): self.driver.move([0]*5, .5)
+        self.driver.enable()
+        self.assertEqual(self.driver.mode, 'active')
+
+    def test_unverified_disable_latches_fault(self):
+        self.driver.connect()
+        self.robot.bus.read.return_value = 1
+        with self.assertRaisesRegex(ValueError, 'torque-off verification failed'):
+            self.driver.disable()
+        self.assertEqual(self.driver.mode, 'fault')
+
     def test_limits_and_nonfinite_targets_rejected(self):
         self.driver.connect()
         self.driver.enable()

@@ -22,6 +22,7 @@ def bridge():
         b = CloudBridge(driver, config, poses)
     b.driver.hold = Mock(wraps=driver.hold)
     b.return_home = Mock()
+    b.authorize = Mock()
     yield b
     b.pause()
 
@@ -56,7 +57,7 @@ def test_watchdog_expires_while_model_thinks_without_network_callbacks(bridge):
     b.return_home.assert_called_once()
     recorder.finish.assert_called_once_with('policy_runtime_timeout')
     assert b.last_stop_reason == 'policy_runtime_timeout'
-    assert not b.pending and not b.ready and not b.auto_queue
+    assert not b.pending and not b.ready and b.auto_queue
     assert b.driver.moves == []
     assert any(m['type']=='safety_abort' and m['code']=='policy_runtime_timeout' for m in messages(b))
 
@@ -151,7 +152,7 @@ def test_timeout_wins_over_simultaneous_policy_complete(bridge):
     wait_expired(b)
     assert b.last_stop_reason=='policy_runtime_timeout'
     b.return_home.assert_called_once()
-    assert not b.auto_queue
+    assert b.auto_queue
 
 
 def test_hold_failure_still_revokes_records_and_reports(bridge):

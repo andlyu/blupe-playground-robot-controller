@@ -1,4 +1,4 @@
-"""Robot-scoped cloud bridge. Each queue handoff requires explicit operator action."""
+"""Robot-scoped cloud bridge. Operator-authorized automatic queue handoffs."""
 from .tolerances import near_pose
 import json
 import copy
@@ -23,6 +23,8 @@ class CloudBridge:
         self.ready = False
         self.auto_queue = False
         self.return_home = None
+        self.return_zero = None
+        self.parked = False
         self.returning_home = False
         self.lease = None
         self.step = 0
@@ -67,6 +69,7 @@ class CloudBridge:
             owned = self.ready or self.lease is not None or self.auto_queue or self.returning_home
             self.auto_queue = False
             self.returning_home = False
+            self.parked = False
             self.ready = False
             self.generation += 1
             self.pending = False
@@ -136,6 +139,7 @@ class CloudBridge:
             with urlopen(f'http://127.0.0.1:{port}/status',timeout=2) as response:
                 if not json.load(response).get('ok'):
                     raise ValueError('Camera must be fresh before accepting a task')
+            self.error = ''
             self.ready = True
             self.client.request_ready()
         return {'queue_ready':True}
@@ -150,16 +154,57 @@ class CloudBridge:
                 if self.config.get('hardware') not in ('so101', 'bimanual_so101'):
                     raise ValueError('Auto-queue is supported for SO101 controllers')
                 if self.auto_queue: return self.status()
+                if self.return_zero is not None:
+                    self.poses.get('zero')
                 self.authorize()
                 self.auto_queue = True
             return self.status()
 
+    def queued_work(self):
+        with urlopen(f'{self.config["api"]}/v1/robots/{self.config["robot_id"]}/queue', timeout=3) as response:
+            snapshot = json.load(response)
+        if not isinstance(snapshot.get('entries'), list):
+            raise ValueError('Queue snapshot has no entries list')
+        return bool(snapshot['entries'])
+
     def _next_auto_task(self, generation):
         try:
+            # Queue HTTP and operator motion never run while holding the cloud lock.
+            # Unknown queue state parks safely and retries; it must not start a run.
+            waiting = False
+            if self.return_zero is not None and self.auto_queue:
+                try:
+                    waiting = self.queued_work()
+                except Exception as error:
+                    with self.lock:
+                        if generation != self.generation: return
+                        self.error = f'Queue lookup failed: {error}'
+            if self.return_zero is not None and not waiting:
+                self.return_zero(generation)
+                with self.lock:
+                    if generation != self.generation: return
+                    self.returning_home = False
+                    self.parked = True
+                while True:
+                    time.sleep(2)
+                    with self.lock:
+                        if generation != self.generation or not self.auto_queue: return
+                    try:
+                        waiting = self.queued_work()
+                    except Exception as error:
+                        with self.lock:
+                            if generation == self.generation:
+                                self.error = f'Queue lookup failed: {error}'
+                        continue
+                    if waiting: break
+                with self.lock:
+                    if generation != self.generation or not self.auto_queue: return
+                    self.returning_home = True
             self.return_home(generation)
             with self.lock:
                 if generation == self.generation:
                     self.returning_home = False
+                    self.parked = False
                     if self.auto_queue:
                         self.authorize()
         except Exception as error:
@@ -175,7 +220,7 @@ class CloudBridge:
                     'run_duration_s':self.run_duration_s,
                     'run_remaining_s':max(0.,self.run_deadline-time.monotonic()) if self.run_deadline is not None else None,
                     'last_stop_reason':self.last_stop_reason,
-                    'returning_home':self.returning_home,
+                    'returning_home':self.returning_home, 'parked':self.parked,
                     'recording':dict(self.recorder.meta) if self.recorder else None, 'recording_error':self.recording_error}
 
     def api_connection_changed(self, connected, error=None):
@@ -399,8 +444,6 @@ class CloudBridge:
                     # Revoke old waypoints under the same lock used by execute().
                     self.pending = False
                     self.returning_home = True
-                    if reason not in ('policy_complete', 'user_requested'):
-                        self.auto_queue = False
                     self.lease = None
                     self.ready = False
                     self.generation += 1

@@ -233,7 +233,7 @@ It neither creates a cloud account nor changes the cloud dashboard deployment.
 
 ### SO101 auto-queue (single or bimanual)
 
-On macOS or Linux, enable the arm, move home, then choose **Enable Auto-queue** in the controller. Successful tasks return home before the next queued task starts. Pause, stop, disconnect, and errors cancel auto-queue. It is off after startup; launching the controller never enables motion automatically. Update an existing checkout with `git pull` and restart its controller process.
+On macOS or Linux, enable the arm, move home, then choose **Enable Auto-queue** in the controller. Visitor Stop, time expiry, and completion keep auto-queue enabled. If work is queued, the arms return to saved Home before accepting it. Otherwise they move to saved Zero and verify torque off; auto-queue checks for new work every two seconds, then enables and returns Home before accepting it. Operator Hold/Pause, disconnect, and faults cancel auto-queue. Both saved poses are required. It is off after startup; launching the controller never enables motion automatically. Update an existing checkout with `git pull` and restart its controller process.
 
 ## SO101 recording and uploads
 
@@ -247,9 +247,9 @@ configured; pulling main alone does not enable uploads.
 The controller requires a finite, positive `run_duration_s` in the Session API
 `prepare_session` handoff. A monotonic watchdog starts when it accepts the session,
 including time spent waiting for the model. At expiry it revokes the lease,
-cancels command execution, disables auto-queue, and calls the existing Hold
-behavior. It does not return home or release torque. Late commands are rejected;
-a new session needs normal operator authorization.
+cancels command execution, and follows the queue-aware Home/Zero cleanup above.
+Late commands are rejected. An already-enabled auto-queue stays enabled;
+cleanup never enables an auto-queue that was off.
 
 The controller reports `policy_runtime_timeout` through the existing safety-abort
 protocol (the API classifies it as `timed_out`) and finalizes the recording with
@@ -257,4 +257,4 @@ that outcome. Status exposes `run_duration_s`, `run_remaining_s`, and
 `last_stop_reason`; handoff logs show the duration actually received. Missing or
 invalid durations fail closed. The local watchdog does not depend on cloud
 connectivity, but Python scheduling and an in-flight hardware IO call can delay
-Hold; this is not a hard real-time or hardware emergency-stop mechanism.
+command revocation; this is not a hard real-time or hardware emergency-stop mechanism.

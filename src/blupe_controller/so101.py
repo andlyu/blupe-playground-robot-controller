@@ -159,6 +159,19 @@ class SO101Driver:
             self.mode = 'active'
             return {**state, 'mode':self.mode}
 
+    def disable(self):
+        with self.lock:
+            try:
+                self.robot.bus.disable_torque()
+                for name in NAMES:
+                    if self.robot.bus.read('Torque_Enable', name, normalize=False) != 0:
+                        raise ValueError(f'{name}: torque-off verification failed')
+            except Exception as error:
+                self.mode, self.error = 'fault', f'{type(error).__name__}: {error}'
+                raise
+            self.mode = 'readonly'
+            return self.state()
+
     def move(self, joints_deg, gripper):
         with self.lock:
             self._validate_target(joints_deg, gripper)

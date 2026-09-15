@@ -105,19 +105,37 @@ class Operator:
         return {'manual_motion':True}
 
     def return_home_for_queue(self, generation):
+        return self.move_for_queue(generation, 'home')
+
+    def return_zero_for_queue(self, generation):
+        return self.move_for_queue(generation, 'zero')
+
+    def move_for_queue(self, generation, pose_name):
         # Never acquire the operator lock while holding the cloud lock.
         with self.lock:
             if generation != self.cloud.generation or not (self.cloud.auto_queue or self.cloud.returning_home):
                 return
-            self.start_pose(self.poses.get('home'))
+            with self.cloud.lock:
+                if generation != self.cloud.generation: return
+                if pose_name == 'home' and self.cloud.parked:
+                    self.driver.enable()
+                self.start_pose(self.poses.get(pose_name))
+                owned_motion = self.motion
         while True:
             time.sleep(.1)
             with self.lock:
                 if generation != self.cloud.generation or not (self.cloud.auto_queue or self.cloud.returning_home):
-                    if self.motion is not None: self.motion.set()
+                    if self.motion is owned_motion: self.motion.set()
                     return
                 if self.motion is None:
                     if self.motion_error: raise ValueError(self.motion_error)
+                    if pose_name == 'zero':
+                        with self.cloud.lock:
+                            if generation != self.cloud.generation: return
+                            zero = self.poses.get('zero')
+                            if not self.cloud.near(self.driver.state(), zero['joints_deg'], zero['gripper']):
+                                raise ValueError('Zero pose was not reached; torque remains enabled')
+                            self.driver.disable()
                     return
 
     def action(self, payload):
@@ -235,6 +253,7 @@ def serve(driver, config):
     if config.get('settings', {}).get('cloud_enabled'):
         operator.cloud = CloudBridge(driver, config, operator.poses)
         operator.cloud.return_home = operator.return_home_for_queue
+        operator.cloud.return_zero = operator.return_zero_for_queue
         operator.cloud.start()
     print(f'{config.get("hardware", "so101")} operator: http://127.0.0.1:{port}/ — read-only until explicitly enabled', flush=True)
     try:
