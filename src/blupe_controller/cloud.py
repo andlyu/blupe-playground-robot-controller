@@ -23,6 +23,7 @@ class CloudBridge:
         self.ready = False
         self.auto_queue = False
         self.return_home = None
+        self.returning_home = False
         self.lease = None
         self.step = 0
         self.recorder = None
@@ -63,8 +64,9 @@ class CloudBridge:
             self.cancel_deadline()
             self.finish_recording(reason)
             self.active_command = None
-            owned = self.ready or self.lease is not None or self.auto_queue
+            owned = self.ready or self.lease is not None or self.auto_queue or self.returning_home
             self.auto_queue = False
+            self.returning_home = False
             self.ready = False
             self.generation += 1
             self.pending = False
@@ -98,8 +100,8 @@ class CloudBridge:
         self.timed_out_lease = lease
         self.error = reason
         try:
-            # Revoke first, cancel workers, finalize recording, then existing Hold.
-            self.pause(reason)
+            # Revoke the expired session before the bounded Home cleanup.
+            self._stop_run({**lease, 'reason': reason})
         except Exception as error:
             self.error = f'{reason}: hold failed: {error}'
             logging.getLogger(__name__).exception('Runtime timeout Hold failed for %s', lease['session_id'])
@@ -113,7 +115,7 @@ class CloudBridge:
                            status='rejected', reason=reason))
             self.client.send({'schema_version':1, **lease, **result})
         self.client.send({'schema_version':1, 'type':'safety_abort', **lease, 'code':reason,
-                          'message':'Controller local run duration expired; Hold requested',
+                          'message':'Controller local run duration expired; ' + ('returning Home' if self.returning_home else 'Hold requested'),
                           'observed_at':time.time(), 'details':{'run_duration_s':duration}})
         return True
 
@@ -124,7 +126,7 @@ class CloudBridge:
 
     def authorize(self):
         with self.lock:
-            if not self.connected or self.lease or self.ready:
+            if not self.connected or self.lease or self.ready or self.returning_home:
                 raise ValueError('Cloud must be connected and idle')
             state = self.driver.state()
             home = self.poses.get('home')
@@ -156,8 +158,10 @@ class CloudBridge:
         try:
             self.return_home(generation)
             with self.lock:
-                if generation == self.generation and self.auto_queue:
-                    self.authorize()
+                if generation == self.generation:
+                    self.returning_home = False
+                    if self.auto_queue:
+                        self.authorize()
         except Exception as error:
             with self.lock:
                 if generation == self.generation:
@@ -171,6 +175,7 @@ class CloudBridge:
                     'run_duration_s':self.run_duration_s,
                     'run_remaining_s':max(0.,self.run_deadline-time.monotonic()) if self.run_deadline is not None else None,
                     'last_stop_reason':self.last_stop_reason,
+                    'returning_home':self.returning_home,
                     'recording':dict(self.recorder.meta) if self.recorder else None, 'recording_error':self.recording_error}
 
     def api_connection_changed(self, connected, error=None):
@@ -377,10 +382,25 @@ class CloudBridge:
         with self.lock:
             if self.expire_run():
                 return
+            self._stop_run(payload)
+
+    def _stop_run(self, payload):
+        with self.lock:
             if self.lease and all(payload.get(k)==v for k,v in self.lease.items()):
+                self.last_stop_reason = payload.get('reason') or 'session_stopped'
+                self.active_command = None
                 self.cancel_deadline()
                 self.finish_recording(payload.get('reason') or 'session_stopped')
-                if self.auto_queue and payload.get('reason') == 'policy_complete' and not self.pending and self.return_home:
+                reason = payload.get('reason')
+                normal_stop = reason in ('policy_complete', 'user_requested', 'session_timeout', 'policy_runtime_timeout')
+                state = self.driver.state()
+                if (normal_stop and self.config.get('hardware') in ('so101', 'bimanual_so101')
+                        and self.return_home and state['mode'] == 'active' and not state.get('error')):
+                    # Revoke old waypoints under the same lock used by execute().
+                    self.pending = False
+                    self.returning_home = True
+                    if reason != 'policy_complete':
+                        self.auto_queue = False
                     self.lease = None
                     self.ready = False
                     self.generation += 1

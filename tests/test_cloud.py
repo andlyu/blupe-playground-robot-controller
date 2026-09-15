@@ -100,7 +100,7 @@ def test_auto_queue_completes_then_homes_and_reauthorizes(hardware):
 
 
 def test_auto_queue_stops_on_fault_or_user_stop():
-    for reason in ('user_requested','session_timeout','lease_expired'):
+    for reason in ('lease_expired','controller_error','emergency_stop'):
         case=CloudTests();case.setUp();b=case.bridge
         b.auto_queue=True;b.lease=case.ids.copy();b.return_home=Mock()
         b.api_handle_stop({**case.ids,'reason':reason})
@@ -114,3 +114,56 @@ def test_auto_queue_failed_admission_does_not_enable():
     import pytest
     with pytest.raises(ValueError): b.set_auto_queue(True)
     assert not b.auto_queue
+
+@pytest.mark.parametrize("hardware", ["so101", "bimanual_so101"])
+@pytest.mark.parametrize("reason", ["user_requested", "session_timeout", "policy_runtime_timeout", "policy_complete"])
+def test_normal_stop_revokes_waypoints_and_returns_home(hardware, reason):
+    case=CloudTests();case.setUp();b=case.bridge
+    b.config['hardware']=hardware;b.lease=case.ids.copy();b.pending=True
+    b.return_home=Mock();b.authorize=Mock();old_generation=b.generation
+    with patch('blupe_controller.cloud.threading.Thread'):
+        b.api_handle_stop({**case.ids,'reason':reason})
+    assert b.returning_home and not b.pending and b.lease is None
+    assert b.generation != old_generation and not b.ready
+    b.execute({**case.ids}, [([1]*5,.5)], False, old_generation)
+    assert case.driver.moves == []
+    b._next_auto_task(b.generation)
+    b.return_home.assert_called_once();b.authorize.assert_not_called()
+    assert not b.returning_home
+
+
+def test_pause_cancels_return_home_and_holds():
+    case=CloudTests();case.setUp();b=case.bridge
+    b.returning_home=True;old=b.generation;b.pause()
+    assert not b.returning_home and b.generation != old and case.driver.held
+
+
+def test_faulted_driver_does_not_return_home():
+    case=CloudTests();case.setUp();b=case.bridge
+    b.config['hardware']='so101';b.lease=case.ids.copy();b.return_home=Mock()
+    case.driver.state=Mock(return_value={'mode':'fault','error':'motor fault'})
+    b.api_handle_stop({**case.ids,'reason':'user_requested'})
+    b.return_home.assert_not_called();assert not b.returning_home
+
+
+@pytest.mark.parametrize('timeout', [False, True])
+def test_user_stop_runs_real_home_callback_without_auto_queue(timeout):
+    from blupe_controller.operator import Operator
+    case=CloudTests();case.setUp();b=case.bridge
+    b.config['hardware']='so101';b.lease=case.ids.copy()
+    case.driver.joints=[10.]*5
+    case.poses.get.return_value={'joints_deg':[0.]*5,'gripper':.5}
+    operator=Operator(case.driver,b.config)
+    operator.cloud=b;operator.poses=case.poses
+    b.return_home=operator.return_home_for_queue
+    if timeout:
+        with b.lock:
+            b.run_deadline=time.monotonic()-1;b.run_duration_s=180
+            assert b.expire_run()
+    else:
+        b.api_handle_stop({**case.ids,'reason':'user_requested'})
+    deadline=time.monotonic()+4
+    while b.returning_home and time.monotonic()<deadline:time.sleep(.02)
+    assert not b.returning_home and case.driver.moves
+    assert max(abs(v) for v in case.driver.joints)<=5
+    assert not b.auto_queue and not b.ready and not operator.motion_error

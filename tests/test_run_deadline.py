@@ -38,7 +38,7 @@ def command(ids=IDS):
 
 def wait_expired(b):
     end = time.monotonic()+2
-    while b.lease is not None and time.monotonic()<end:
+    while (b.lease is not None or b.returning_home) and time.monotonic()<end:
         time.sleep(.005)
     assert b.lease is None
 
@@ -52,8 +52,8 @@ def test_watchdog_expires_while_model_thinks_without_network_callbacks(bridge):
     prepare(b, .04)
     recorder = Mock(); b.recorder = recorder; b.auto_queue = True
     wait_expired(b)
-    b.driver.hold.assert_called_once()
-    b.return_home.assert_not_called()
+    b.driver.hold.assert_not_called()
+    b.return_home.assert_called_once()
     recorder.finish.assert_called_once_with('policy_runtime_timeout')
     assert b.last_stop_reason == 'policy_runtime_timeout'
     assert not b.pending and not b.ready and not b.auto_queue
@@ -71,7 +71,7 @@ def test_expiry_during_trajectory_stops_dispatch_and_aborts(bridge):
     moves = len(b.driver.moves)
     time.sleep(.35)
     assert 0 < moves < 6 and len(b.driver.moves)==moves
-    b.driver.hold.assert_called_once()
+    b.driver.hold.assert_not_called()
     assert any(m.get('trajectory_id')=='trajectory' and m.get('status')=='aborted'
                and m.get('code')=='policy_runtime_timeout' for m in messages(b))
     assert not any(m.get('status')=='completed' for m in messages(b))
@@ -96,7 +96,7 @@ def test_dispatch_checks_deadline_even_if_watchdog_has_not_run(bridge):
         result=b.api_handle_joint_command(command())
     assert result[0]['reason']=='policy_runtime_timeout'
     assert b.driver.moves==[]
-    b.driver.hold.assert_called_once()
+    b.driver.hold.assert_not_called()
 
 
 def test_expired_worker_cannot_move_even_before_watchdog_runs(bridge):
@@ -107,7 +107,7 @@ def test_expired_worker_cannot_move_even_before_watchdog_runs(bridge):
     with patch('blupe_controller.cloud.time.monotonic',return_value=190.):
         b.execute(command(),[([1]*5,.5)],False,generation)
     assert not b.driver.moves
-    b.driver.hold.assert_called_once()
+    b.driver.hold.assert_not_called()
 
 
 def test_late_commands_and_subsequent_session_are_isolated(bridge):
@@ -130,7 +130,7 @@ def test_late_commands_and_subsequent_session_are_isolated(bridge):
     end=time.monotonic()+1
     while b.pending and time.monotonic()<end:time.sleep(.01)
     assert b.driver.moves==[[1]*5] and b.lease==new_ids
-    b.driver.hold.assert_called_once()
+    b.driver.hold.assert_not_called()
 
 
 @pytest.mark.parametrize('duration',[None,True,0,-1,float('inf'),float('nan'),'180'])
@@ -148,8 +148,9 @@ def test_timeout_wins_over_simultaneous_policy_complete(bridge):
     b.auto_queue=True
     with patch('blupe_controller.cloud.time.monotonic',return_value=190.):
         b.api_handle_stop({**IDS,'reason':'policy_complete'})
+    wait_expired(b)
     assert b.last_stop_reason=='policy_runtime_timeout'
-    b.return_home.assert_not_called()
+    b.return_home.assert_called_once()
     assert not b.auto_queue
 
 
@@ -158,6 +159,7 @@ def test_hold_failure_still_revokes_records_and_reports(bridge):
     with patch.object(b,'watch_deadline'):
         prepare(b,180)
     b.recorder=Mock();recorder=b.recorder
+    b.return_home=None
     b.driver.hold.side_effect=OSError('servo unavailable')
     with b.lock:
         b.run_deadline=time.monotonic()-1

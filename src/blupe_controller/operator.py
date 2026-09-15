@@ -107,13 +107,13 @@ class Operator:
     def return_home_for_queue(self, generation):
         # Never acquire the operator lock while holding the cloud lock.
         with self.lock:
-            if generation != self.cloud.generation or not self.cloud.auto_queue:
+            if generation != self.cloud.generation or not (self.cloud.auto_queue or self.cloud.returning_home):
                 return
             self.start_pose(self.poses.get('home'))
         while True:
             time.sleep(.1)
             with self.lock:
-                if generation != self.cloud.generation or not self.cloud.auto_queue:
+                if generation != self.cloud.generation or not (self.cloud.auto_queue or self.cloud.returning_home):
                     if self.motion is not None: self.motion.set()
                     return
                 if self.motion is None:
@@ -136,7 +136,7 @@ class Operator:
             if action == 'cloud_pause':
                 if self.cloud: self.cloud.pause()
                 return {'queue_ready':False}
-            if self.cloud and (self.cloud.ready or self.cloud.lease or self.cloud.auto_queue):
+            if self.cloud and (self.cloud.ready or self.cloud.lease or self.cloud.auto_queue or self.cloud.returning_home):
                 if action != 'hold': raise ValueError('Pause cloud control before using manual controls')
                 self.cloud.pause()
             if action == 'enable':
