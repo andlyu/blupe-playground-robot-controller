@@ -520,8 +520,12 @@ class CloudBridge:
             queue_ready = bool(self.connected and self.auto_queue and self.ready and homed
                                and state['mode'] == 'active' and not state['error']
                                and not self.pending and not self.returning_home and not self.lease)
+            parked_ready = bool(self.connected and self.auto_queue and self.parked
+                                and state['mode'] == 'readonly' and not state['error']
+                                and not self.ready and not self.pending and not self.returning_home and not self.lease)
             mode = ('FAULT' if state['mode'] == 'fault' else self.cleanup_phase
-                    or ('EXECUTING' if self.lease else 'READY' if queue_ready else 'STOPPED'))
+                    or ('EXECUTING' if self.lease else 'READY' if queue_ready
+                        else 'STOPPED_READY' if parked_ready else 'STOPPED'))
             if self.config.get('hardware') not in ('so101', 'bimanual_so101'):
                 mode, queue_ready = state['mode'], self.ready
             return {'schema_version':1,'type':'station_status','source':'hardware','mode':mode,

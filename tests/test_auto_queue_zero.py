@@ -47,7 +47,7 @@ def test_zero_waits_without_motor_writes_then_homes_before_admission(setup):
     o.action(dict(action='auto_queue', enabled=True))
     wait_for(lambda: b.queued_work.called)
     assert b.auto_queue and b.parked and not b.ready
-    assert b.api_station_status_payload()['mode'] == 'STOPPED'
+    assert b.api_station_status_payload()['mode'] == 'STOPPED_READY'
     assert d.sent == []
     d.enable.assert_not_called(); d.disable.assert_not_called()
     b.client.request_ready.assert_not_called()

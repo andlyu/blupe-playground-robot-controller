@@ -64,14 +64,27 @@ def test_cleanup_publishes_actual_destination_and_clears_on_pause(bridge, waitin
     assert b.api_station_status_payload()['mode'] == 'STOPPED'
 
 
-def test_fault_overrides_motion_and_parked_is_not_ready(bridge):
+def test_parked_auto_queue_is_ready_to_wait_but_not_to_admit_a_run(bridge):
     b = bridge
     b.parked = True
     b.ready = False
     b.driver.state()['mode'] = 'readonly'
-    assert b.api_station_status_payload()['mode'] == 'STOPPED'
+    assert b.api_station_status_payload()['mode'] == 'STOPPED_READY'
     assert not b.api_station_status_payload()['queue_ready']
+    for field, blocked in [('auto_queue', False), ('connected', False), ('parked', False),
+                           ('pending', True), ('returning_home', True), ('ready', True)]:
+        original = getattr(b, field)
+        setattr(b, field, blocked)
+        assert b.api_station_status_payload()['mode'] != 'STOPPED_READY'
+        setattr(b, field, original)
+    b.driver.state()['error'] = 'motor error'
+    assert b.api_station_status_payload()['mode'] != 'STOPPED_READY'
+    b.driver.state()['error'] = ''
+    b.lease = {'session_id': 'active'}
+    assert b.api_station_status_payload()['mode'] == 'EXECUTING'
+    b.lease = None
     b.cleanup_phase = 'MOVING_HOME'
+    assert b.api_station_status_payload()['mode'] == 'MOVING_HOME'
     b.driver.state()['mode'] = 'fault'
     status = b.api_station_status_payload()
     assert status['mode'] == 'FAULT' and not status['safety']['ok']
