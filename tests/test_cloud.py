@@ -83,13 +83,14 @@ def test_home_and_trajectory_share_so101_tolerance():
 
 
 @pytest.mark.parametrize("hardware", ["so101", "bimanual_so101"])
-def test_auto_queue_completes_then_homes_and_reauthorizes(hardware):
+@pytest.mark.parametrize('reason', ['policy_complete', 'user_requested'])
+def test_auto_queue_completes_then_homes_and_reauthorizes(hardware, reason):
     case=CloudTests();case.setUp();b=case.bridge
     b.config['hardware']=hardware; b.authorize=Mock()
     b.set_auto_queue(True);assert b.auto_queue
     b.lease=case.ids.copy();b.return_home=Mock()
     with patch('blupe_controller.cloud.threading.Thread') as thread:
-        b.api_handle_stop({**case.ids,'reason':'policy_complete'})
+        b.api_handle_stop({**case.ids,'reason':reason})
         thread.return_value.start.assert_called_once()
     assert b.lease is None and b.auto_queue
     generation=b.generation;b._next_auto_task(generation)

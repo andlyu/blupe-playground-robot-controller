@@ -399,7 +399,7 @@ class CloudBridge:
                     # Revoke old waypoints under the same lock used by execute().
                     self.pending = False
                     self.returning_home = True
-                    if reason != 'policy_complete':
+                    if reason not in ('policy_complete', 'user_requested'):
                         self.auto_queue = False
                     self.lease = None
                     self.ready = False
