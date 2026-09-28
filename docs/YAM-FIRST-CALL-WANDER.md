@@ -52,3 +52,10 @@ The preview's roughly 49 cm excursion is not a hardware guarantee. On the tested
 Robo-house saved home/configuration, the planner accepted a 0.4 distance scale
 (about 20 cm per grasp point). Every live start repeats planning and validation
 from that rig's actual measured pose.
+
+For an existing custom entry point that should remain untouched, run the public
+`runtime/scripts/with_first_call_wander.py` wrapper with the same flags and set
+`BLUPE_CONTROLLER_ROOT` to its runtime checkout, `BLUPE_YAM_ENTRYPOINT` to the
+original Python entry point, and `YAM_FIRST_CALL_WANDER=1`. The wrapper loads only
+the new extension from this checkout; existing drivers and calibration stay with
+the original runtime. Install it while the controller is idle and torque-off.
