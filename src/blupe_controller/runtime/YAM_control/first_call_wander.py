@@ -35,8 +35,10 @@ def plan_wander(model_path, config, guard, start):
         try:
             seed = start.copy()
             keys = [start.copy()]
-            for offsets in (((-.10, .24, .08), (0., -.025, .01)),
-                            ((-.18, .44, .12), (-.18, -.44, .12))):
+            # +x is forward in the shared bimanual base frame. Keep the
+            # sideways component small, with the right arm following the left.
+            for offsets in (((.24, .025, .08), (.025, -.005, .01)),
+                            ((.44, .04, .12), (.44, -.04, .12))):
                 for arm, side in enumerate(('left', 'right')):
                     position, rotation = poses[arm]
                     seed = planner._solve_pose(seed, side+'_grasp', slice(arm*6, arm*6+6),

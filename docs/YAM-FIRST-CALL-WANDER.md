@@ -1,6 +1,6 @@
 # First-call wandering (YAM only)
 
-The YAM controller can perform a small outward wandering motion while the first
+The YAM controller can perform a mostly forward wandering motion while the first
 model request is pending. Enable with `YAM_FIRST_CALL_WANDER=1` on the controller.
 Installation alone leaves it disabled. The runner must use the authenticated
 Session API executor described below; no motion starts merely because a session
@@ -11,7 +11,7 @@ positions, and checks joint limits, speed, workspace and swept collisions for th
 whole round trip. It tries smaller Cartesian paths if the full preview cannot
 pass. Closed or partly closed grippers skip the animation. The collision model
 cannot detect arbitrary people or newly placed objects: operate only with the
-outward sweep clear. Open fingers are not proof that the workspace is clear.
+forward sweep clear. Open fingers are not proof that the workspace is clear.
 
 It starts only before the first policy command and is consumed once per lease.
 After at most ten seconds, or when `finish` arrives, it retraces the path and waits
@@ -59,3 +59,8 @@ For an existing custom entry point that should remain untouched, run the public
 original Python entry point, and `YAM_FIRST_CALL_WANDER=1`. The wrapper loads only
 the new extension from this checkout; existing drivers and calibration stay with
 the original runtime. Install it while the controller is idle and torque-off.
+
+The current path favors +x (forward in the bimanual base frame), with a small
+outward bias and lift. Robo-house saved-home preflight accepts about 26.4 cm
+forward, 2.4 cm sideways and 7.2 cm upward over ten seconds. Runtime validation
+can choose a smaller path or skip it if the rig cannot safely reach it.
