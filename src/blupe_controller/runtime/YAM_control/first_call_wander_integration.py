@@ -23,8 +23,8 @@ def install(hardware):
             self.first_call_wander = FirstCallWander(self._physical, self._safety_guardrails,
                 self._safety_config, hardware.base.MODEL_PATH, self._wander_authorized)
 
-        def status(self):
-            result = super().status()
+        def status(self, *args, **kwargs):
+            result = super().status(*args, **kwargs)
             result['first_call_wander'] = self.first_call_wander.status()
             result['first_call_wander']['enabled'] = os.environ.get('YAM_FIRST_CALL_WANDER') == '1'
             return result

@@ -91,10 +91,12 @@ class IntegrationTests(unittest.TestCase):
                 self._safety_config=NS(max_joint_velocity_rad_s=.35)
                 self.mode='API_ACTIVE';self.api_authorized=True;self.api_last_step=-1
                 self.api_session_id='s';self.api_episode_id='e';self.api_lease_id='l';self._hardware_pending=None
+            def status(self, *, include_diagnostics=True):return dict(include_diagnostics=include_diagnostics)
             def _api_raw_trajectory_result_locked(self,payload,status,code):return dict(status=status,code=code)
             def api_handle_joint_trajectory(self,payload):return ['accepted']
         hardware=NS(PhysicalOperator=Parent,base=NS(MODEL_PATH='unused',OperatorSimulator=Parent))
         install(hardware);op=hardware.PhysicalOperator()
+        self.assertFalse(op.status(include_diagnostics=False)['include_diagnostics'])
         p=dict(schema_version=1,executor='yam_first_call',operation='start',payload={},
                session_id='s',episode_id='e',lease_id='l',expires_at=time.time()+120)
         with patch.dict(os.environ,{'YAM_FIRST_CALL_WANDER':'1'}):
