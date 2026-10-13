@@ -45,7 +45,7 @@ def scene(op,tmp_path):
 
 def test_coherent_capture_saved_then_offered_only_once(tmp_path):
     op=Operator();cache=scene(op,tmp_path)
-    with patch('YAM_control.home_scene.RelayFrames.one',side_effect=lambda _,name,device:source(name,device)):
+    with patch('YAM_control.home_scene.capture_frame',side_effect=lambda name,device:source(name,device)):
         cache.capture(threading.Event())
     saved=json.loads(cache.path.read_text())
     assert saved['observation']['left_gripper']==1 and set(saved['frames'])=={'left','top','right'}
@@ -55,22 +55,48 @@ def test_coherent_capture_saved_then_offered_only_once(tmp_path):
     assert scene(op,tmp_path).scene is None # Never reuse across process restarts.
 
 
+def test_home_capture_reads_raw_relay_frames_without_recording_client_state(tmp_path, monkeypatch):
+    import io
+    from YAM_control import home_scene, training_recorder
+    calls = []
+    jpeg = b'\xff\xd8raw-model-camera-pixels\xff\xd9'
+    def recording_frame(self, *args, **kwargs):
+        # Installed recording clients require constructor-owned connection state
+        # and resize their JPEGs. Home evidence must not borrow this method.
+        return self._local.connections
+    monkeypatch.setattr(training_recorder.RelayFrames, 'one', recording_frame)
+    def request(url, *, timeout):
+        calls.append((url, timeout))
+        result = io.BytesIO(jpeg)
+        result.headers = {'X-Capture-Monotonic': str(time.monotonic()), 'X-Frame-Sequence': '7'}
+        return result
+    monkeypatch.setattr(home_scene, 'urlopen', request, raising=False)
+    cache = scene(Operator(), tmp_path)
+    cache.capture(threading.Event())
+    assert {url for url, timeout in calls} == {
+        f'http://127.0.0.1:8089/{device}/snapshot.jpg' for device in (10,16,4)}
+    assert all(timeout == .5 for url, timeout in calls)
+    assert all(base64.b64decode(frame['jpeg_base64']) == jpeg for frame in cache.scene['frames'].values())
+    assert cache.path.exists()
+
+
 @pytest.mark.parametrize('bad',['gripper','stale','skew','drift','cancel'])
 def test_unverifiable_capture_never_publishes(tmp_path,bad):
     op=Operator();cache=scene(op,tmp_path);cancel=threading.Event()
     if bad=='gripper':op.grip=.5
     if bad=='cancel':cancel.set()
-    def capture(_,name,device):
+    def capture(name,device):
         key,f=source(name,device)
         if bad=='stale':f['monotonic']-=1
         if bad=='skew' and name=='top':f['monotonic']-=.2
         if bad=='drift':op.joints=(.1,)*12
         return key,f
-    with patch('YAM_control.home_scene.RelayFrames.one',side_effect=capture):
+    with patch('YAM_control.home_scene.capture_frame',side_effect=capture):
         if bad=='cancel':cache.capture(cancel)
         else:
             with pytest.raises(ValueError):cache.capture(cancel)
     assert cache.scene is None and not cache.path.exists()
+    assert bool(cache.capture_error) is (bad != 'cancel')
 
 
 def accepted_cache(op, cache):
@@ -161,7 +187,7 @@ def test_capture_supports_packaged_and_custom_status_signatures(tmp_path, diagno
     hardware = NS(PhysicalOperator=parent, base=NS(OperatorSimulator=parent))
     install(hardware, dict(robot_id='yam-1', cameras={'left':10,'top':16,'right':4}), tmp_path/'scene.json')
     op = hardware.PhysicalOperator()
-    with patch('YAM_control.home_scene.RelayFrames.one', side_effect=lambda _,name,device:source(name,device)):
+    with patch('YAM_control.home_scene.capture_frame', side_effect=lambda name,device:source(name,device)):
         op.home_scene.capture(threading.Event())
     assert op.home_scene.scene is not None and op.home_scene.path.exists()
     assert calls == ([False, False] if diagnostics_supported else [None, None])
