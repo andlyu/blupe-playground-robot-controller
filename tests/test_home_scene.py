@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src/blupe_controller/runtime'))
-from YAM_control.home_scene import HomeScene, home_duration
+from YAM_control.home_scene import HomeScene
 from YAM_control.auto_queue import AutoQueue
 from YAM_control.i2rt_bimanual_adapter import AdapterState
 from YAM_control.ruckig_waypath import plan_joint_trajectory
@@ -73,15 +73,48 @@ def test_unverifiable_capture_never_publishes(tmp_path,bad):
     assert cache.scene is None and not cache.path.exists()
 
 
-def test_pacing_uses_measured_mean_and_calibration_with_cold_default():
-    assert home_duration(None,8) is None
-    assert home_duration(float('nan'),8) is None
-    assert home_duration(15,8,1)==6
-    assert home_duration(2,8,1)==0
-    assert home_duration(100,8,1)==30
+def accepted_cache(op, cache):
+    fingerprint = cache.fingerprint()
+    cache.offer = dict(session_id='s', scene=dict(config_sha256=fingerprint, captured_at=time.time()))
+    cache.timing = dict(started_monotonic=time.monotonic()-8)
+    op.queue[0]['home_planning'].update(config_sha256=fingerprint, sample_count=0)
+
+
+@pytest.mark.parametrize('calibration_s,mean_s', [(0,None),(8,None),(20,2),(8,100)])
+def test_accepted_cache_gets_ten_second_home_without_timing_history(tmp_path, calibration_s, mean_s):
+    op=Operator();cache=scene(op,tmp_path);accepted_cache(op,cache)
+    cache.timing['started_monotonic']=time.monotonic()-calibration_s
+    op.queue[0]['home_planning']['mean_first_plan_s']=mean_s
+    assert cache.duration()==10.0
+    assert cache.timing['using_cache'] is True
+    assert cache.timing['target_home_s']==10.0
+
+
+@pytest.mark.parametrize('case', ['cold','not_accepted','queue_changed','empty_queue','ineligible',
+    'configuration_changed','scene_changed','stale','future','invalidated','api_unsupported'])
+def test_no_usable_cache_preserves_normal_home_timing(tmp_path, case):
+    op=Operator();cache=scene(op,tmp_path);accepted_cache(op,cache)
+    hint=op.queue[0]['home_planning']
+    hint.update(mean_first_plan_s=30,sample_count=10)
+    if case=='cold':cache.offer=None
+    elif case=='not_accepted':hint['config_sha256']=None
+    elif case=='queue_changed':op.queue[0]['session_id']='different'
+    elif case=='empty_queue':op.queue=[]
+    elif case=='ineligible':hint.pop('profile')
+    elif case=='configuration_changed':op.home=(.1,)*12
+    elif case=='scene_changed':cache.offer['scene']['config_sha256']='different'
+    elif case=='stale':cache.offer['scene']['captured_at']=time.time()-121
+    elif case=='future':cache.offer['scene']['captured_at']=time.time()+10
+    elif case=='invalidated':cache.invalidate()
+    elif case=='api_unsupported':op.api_home_scene_supported=False
+    assert cache.duration() is None
+    assert cache.timing['using_cache'] is False
+
+
+def test_pacing_only_slows_safe_trajectory_and_preserves_endpoint():
     normal=plan_joint_trajectory(((0.,)*12,(.1,)*12))
-    paced=plan_joint_trajectory(((0.,)*12,(.1,)*12),minimum_duration_s=8)
-    assert paced.duration_s>=8 and paced.duration_s>=normal.duration_s
+    paced=plan_joint_trajectory(((0.,)*12,(.1,)*12),minimum_duration_s=10)
+    assert paced.duration_s>=10 and paced.duration_s>=normal.duration_s
     assert paced.max_velocity_rad_s<=normal.max_velocity_rad_s+1e-8
     np.testing.assert_allclose(paced.positions[-1],normal.positions[-1])
     for value in (-1,31,float('nan')):
