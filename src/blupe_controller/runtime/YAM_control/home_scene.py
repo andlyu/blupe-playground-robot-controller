@@ -62,7 +62,7 @@ class HomeScene:
         self.offer = None
 
     def _measured(self):
-        status = self.op.status(include_diagnostics=False)
+        status = self.op.status(**getattr(self.op, '_home_scene_status_kwargs', {}))
         if (not status.get('homed') or not status.get('settled')
                 or not status.get('feedback_available', False)
                 or not status.get('safety', {}).get('controller_ok')
@@ -191,6 +191,10 @@ def install(hardware, config, path=None):
         return
     class HomeSceneOperator(parent):
         _home_scene_installed = True
+        # Custom stations can omit expensive diagnostics; the packaged
+        # controller exposes status() without that optional keyword.
+        _home_scene_status_kwargs = ({'include_diagnostics': False}
+            if 'include_diagnostics' in inspect.signature(parent.status).parameters else {})
         def __init__(self,*args,**kwargs):
             super().__init__(*args,**kwargs)
             self.home_scene = HomeScene(self,config,path)

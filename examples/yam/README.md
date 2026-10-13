@@ -12,5 +12,8 @@ when its fresh scene offer has been accepted for the same eligible queued run
 and the configuration still matches. This is the Home movement itself; launch
 and gripper calibration happen first. Existing velocity/acceleration/jerk limits
 may require longer. No timing history is needed. Without a usable accepted cache,
-Home keeps its normal safe timing with no added delay. Stop and timeout cleanup
-retain their existing behavior.
+Home keeps its normal safe timing with no added delay. The playground Stop button and normal policy completion first revoke the run,
+then return Home, capture the scene, and park at Zero with torque disabled. This
+cleanup also runs when automatic queue starts are paused. Operator emergency
+Stop, faults, disconnect, credential clearing and timeout do not request a Home
+capture.

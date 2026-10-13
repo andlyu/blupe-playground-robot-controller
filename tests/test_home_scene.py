@@ -145,6 +145,28 @@ def test_custom_home_wrapper_keeps_owner_and_scopes_timing_hint(tmp_path):
     assert op.home_scene.fingerprint() != first
 
 
+@pytest.mark.parametrize('diagnostics_supported', [False, True])
+def test_capture_supports_packaged_and_custom_status_signatures(tmp_path, diagnostics_supported):
+    from YAM_control.home_scene import install
+    calls = []
+    class Packaged(Operator):
+        def status(self):
+            calls.append(None)
+            return Operator.status(self)
+    class Custom(Operator):
+        def status(self, *, include_diagnostics=True):
+            calls.append(include_diagnostics)
+            return Operator.status(self)
+    parent = Custom if diagnostics_supported else Packaged
+    hardware = NS(PhysicalOperator=parent, base=NS(OperatorSimulator=parent))
+    install(hardware, dict(robot_id='yam-1', cameras={'left':10,'top':16,'right':4}), tmp_path/'scene.json')
+    op = hardware.PhysicalOperator()
+    with patch('YAM_control.home_scene.RelayFrames.one', side_effect=lambda _,name,device:source(name,device)):
+        op.home_scene.capture(threading.Event())
+    assert op.home_scene.scene is not None and op.home_scene.path.exists()
+    assert calls == ([False, False] if diagnostics_supported else [None, None])
+
+
 def test_launcher_installs_after_existing_customizations(tmp_path, monkeypatch):
     import runpy
     from types import ModuleType
@@ -237,3 +259,55 @@ def test_relay_preserves_source_epoch_and_pixels_together(monkeypatch):
     handler.do_GET()
     assert f'X-Captured-At: {cam.last_frame_wall}\r\n'.encode() in handler.wfile.getvalue()
     assert cam.jpeg in handler.wfile.getvalue()
+
+
+def stopped_operator(tmp_path):
+    # Exercise the production stop handler with the real queue state machine,
+    # without importing the hardware server or opening any motor connection.
+    import ast
+    from types import MethodType
+    path=Path(__file__).resolve().parents[1]/'src/blupe_controller/runtime/scripts/yam_operator_hardware_web.py'
+    cls=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.ClassDef) and n.name=='PhysicalOperator')
+    method=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='api_handle_stop')
+    scope={'threading':threading};exec(compile(ast.Module(body=[method],type_ignores=[]),str(path),'exec'),scope)
+    op=lifecycle(tmp_path);op.api_session_id='session';op.api_lease_id='lease';op.api_authorized=True
+    op.api_handle_stop=MethodType(scope['api_handle_stop'],op)
+    def hold(reason):
+        op.calls.append(('hold',reason));op.api_session_id=None;op.api_lease_id=None;op.api_authorized=False
+    op._hold_physical=hold
+    op._finish_training_recording=lambda reason:op.calls.append(('recording_end',reason))
+    op._clear_api_lease_locked=lambda:hold('clear_faulted_lease')
+    return op
+
+
+@pytest.mark.parametrize('reason',['user_requested','policy_complete'])
+@pytest.mark.parametrize('auto_queue_enabled',[False,True])
+@pytest.mark.parametrize('waiting',[False,True])
+def test_normal_stop_captures_before_parking_even_when_queue_paused(tmp_path,reason,auto_queue_enabled,waiting):
+    op=stopped_operator(tmp_path);op.auto_queue.enabled=auto_queue_enabled
+    if not waiting:op.queue=[]
+    op.api_handle_stop(dict(session_id='session',lease_id='lease',reason=reason))
+    assert op.api_lease_id is None and not op.api_authorized
+    op.auto_queue.tick()
+    assert op.calls==[('hold',reason),'home','capture','park']
+    assert op.auto_queue.parked
+
+
+@pytest.mark.parametrize('reason',['operator_stop','browser_stop_or_forget','browser_disconnect','session_timeout','api_error'])
+def test_abort_reasons_do_not_add_home_capture(tmp_path,reason):
+    op=stopped_operator(tmp_path);op.auto_queue.enabled=True;op.queue=[]
+    op.api_handle_stop(dict(session_id='session',lease_id='lease',reason=reason))
+    op.auto_queue.tick()
+    assert op.calls==[('hold',reason),'park']
+
+
+@pytest.mark.parametrize('case',['stale_session','stale_lease','fault','cancelled_cleanup'])
+def test_normal_stop_never_bypasses_lease_fault_or_cancellation(tmp_path,case):
+    op=stopped_operator(tmp_path);payload=dict(session_id='session',lease_id='lease',reason='user_requested')
+    if case=='stale_session':payload['session_id']='old'
+    elif case=='stale_lease':payload['lease_id']='old'
+    elif case=='fault':op.mode='FAULT';op._physical.fault='motor fault'
+    op.api_handle_stop(payload)
+    if case=='cancelled_cleanup':op.stop_event.set()
+    op.auto_queue.tick()
+    assert 'home' not in op.calls and 'capture' not in op.calls
