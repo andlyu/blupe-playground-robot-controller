@@ -99,6 +99,118 @@ def test_unverifiable_capture_never_publishes(tmp_path,bad):
     assert bool(cache.capture_error) is (bad != 'cancel')
 
 
+class CaptureClock:
+    def __init__(self):
+        self.now = 10.
+        self.stopped = False
+        self.cancel_on_wait = False
+    def is_set(self):
+        return self.stopped
+    def wait(self, seconds):
+        self.now += seconds
+        self.stopped = self.stopped or self.cancel_on_wait
+        return self.stopped
+
+
+def recapture_fixture(tmp_path, monkeypatch, failure, *, persistent=False):
+    from YAM_control import home_scene
+    clock = CaptureClock()
+    monkeypatch.setattr(home_scene, 'time', NS(monotonic=lambda:clock.now, time=lambda:1700000000.))
+    cache = scene(Operator(), tmp_path)
+    measured = []
+    frames = []
+    def measure():
+        measured.append(clock.now)
+        attempt = (len(measured)+1)//2
+        assert cache.scene is None and not cache.path.exists()
+        failing = attempt == 1 or persistent
+        if failing and failure == 'bracket' and len(measured)%2:
+            clock.now += 1.01
+        if failing and failure == 'expired' and not len(measured)%2:
+            clock.now += .3
+        return [attempt*.001]*12, [1.,1.]
+    def frame(name, device):
+        attempt = (len(measured)+1)//2
+        stamp = clock.now
+        if attempt == 1 or persistent:
+            if failure == 'stale': stamp -= 1
+            elif failure == 'skew' and name == 'top': stamp -= .16
+            elif failure == 'future': stamp += 1
+        frames.append((attempt, name))
+        return name, dict(jpeg=b'\xff\xd8'+str(attempt).encode(), monotonic=stamp, sequence=attempt)
+    monkeypatch.setattr(cache, '_measured', measure)
+    monkeypatch.setattr(home_scene, 'capture_frame', frame)
+    return cache, clock, measured, frames
+
+
+@pytest.mark.parametrize('failure', ['stale', 'skew', 'expired', 'bracket', 'future'])
+def test_freshness_failure_recaptures_all_frames_in_new_encoder_bracket(tmp_path, monkeypatch, failure):
+    cache, clock, measured, frames = recapture_fixture(tmp_path, monkeypatch, failure)
+    cache.capture(clock)
+    saved = json.loads(cache.path.read_text())
+    assert len(measured) == 4  # Both encoder checks run again for the new frame set.
+    assert {name for attempt,name in frames if attempt == 2} == {'left','top','right'}
+    assert all(base64.b64decode(f['jpeg_base64']) == b'\xff\xd82' for f in saved['frames'].values())
+    assert all(f['sequence'] == 2 for f in saved['frames'].values())
+    assert saved['observation']['left_joints_deg'] == pytest.approx([math.degrees(.002)]*6)
+    assert cache.capture_error is None
+
+
+def test_persistent_freshness_failure_is_bounded_and_never_saved(tmp_path, monkeypatch):
+    cache, clock, measured, frames = recapture_fixture(tmp_path, monkeypatch, 'expired', persistent=True)
+    with pytest.raises(ValueError, match='freshness'):
+        cache.capture(clock)
+    assert len(measured) == 6
+    assert len(frames) == 9
+    assert cache.scene is None and not cache.path.exists()
+    assert 'freshness' in cache.capture_error
+
+
+def test_cancel_during_recapture_wait_does_not_read_or_publish_again(tmp_path, monkeypatch):
+    cache, clock, measured, frames = recapture_fixture(tmp_path, monkeypatch, 'expired')
+    original = cache._measured
+    def measure():
+        result = original()
+        if len(measured) == 2:
+            clock.cancel_on_wait = True
+        return result
+    monkeypatch.setattr(cache, '_measured', measure)
+    cache.capture(clock)
+    assert len(frames) == 3 and len(measured) == 2
+    assert cache.scene is None and not cache.path.exists()
+
+
+def test_pose_drift_is_terminal_even_when_frames_are_also_expired(tmp_path, monkeypatch):
+    cache, clock, measured, frames = recapture_fixture(tmp_path, monkeypatch, 'expired')
+    original = cache._measured
+    def measure():
+        q,g = original()
+        return ([value+.1 for value in q] if len(measured)%2 == 0 else q),g
+    monkeypatch.setattr(cache, '_measured', measure)
+    with pytest.raises(ValueError, match='pose changed'):
+        cache.capture(clock)
+    assert len(measured) == 2 and len(frames) == 3
+    assert cache.scene is None and not cache.path.exists()
+
+
+@pytest.mark.parametrize('unsafe', ['pose', 'lease', 'fault'])
+def test_recapture_rechecks_home_and_stops_on_changed_safety_state(tmp_path, monkeypatch, unsafe):
+    cache, clock, measured, frames = recapture_fixture(tmp_path, monkeypatch, 'expired')
+    original = cache._measured
+    def measure():
+        if len(measured) == 2:
+            if unsafe == 'pose': cache.op.grip = .5
+            elif unsafe == 'lease': cache.op.api_lease_id = 'new-lease'
+            elif unsafe == 'fault': cache.op.status = lambda **kw: {'safety': {'controller_ok':False}}
+            return HomeScene._measured(cache)
+        return original()
+    monkeypatch.setattr(cache, '_measured', measure)
+    with pytest.raises(ValueError, match='Home'):
+        cache.capture(clock)
+    assert len(frames) == 3 and len(measured) == 2
+    assert cache.scene is None and not cache.path.exists()
+
+
 def accepted_cache(op, cache):
     fingerprint = cache.fingerprint()
     cache.offer = dict(session_id='s', scene=dict(config_sha256=fingerprint, captured_at=time.time()))

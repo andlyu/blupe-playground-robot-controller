@@ -15,6 +15,11 @@ from YAM_control.training_recorder import atomic_json
 
 
 CACHED_HOME_DURATION_S = 10.0
+MAX_CAPTURE_ATTEMPTS = 3
+
+
+class CaptureFreshnessError(ValueError):
+    """Retryable camera timing rejection; pose and safety failures are terminal."""
 
 
 def capture_frame(name, device):
@@ -92,8 +97,21 @@ class HomeScene:
 
     def capture(self, cancel):
         self.capture_error = None
+        self.invalidate()
         try:
-            return self._capture(cancel)
+            for attempt in range(MAX_CAPTURE_ATTEMPTS):
+                if cancel.is_set():
+                    return
+                try:
+                    return self._capture(cancel)
+                except CaptureFreshnessError as exc:
+                    if attempt == MAX_CAPTURE_ATTEMPTS-1:
+                        raise
+                    logging.getLogger(__name__).info(
+                        '[home-scene] recapturing after freshness rejection (%s/%s): %s',
+                        attempt+1, MAX_CAPTURE_ATTEMPTS, exc)
+                    if cancel.wait(.05):
+                        return
         except Exception as exc:
             self.capture_error = f'{type(exc).__name__}: {exc}'[:200]
             raise
@@ -117,12 +135,21 @@ class HomeScene:
         end, wall = time.monotonic(),time.time()
         if cancel.is_set():
             return
+        if set(frames) != {'left','top','right'}:
+            raise ValueError('Home capture camera roles are incomplete')
+        joint_drift = max(abs(a-b) for a,b in zip(q,before_q))
+        gripper_drift = max(abs(a-b) for a,b in zip(g,before_g))
+        # Pose changes must fail even if the same frame set is also too old.
+        if joint_drift > math.radians(.25) or gripper_drift > .01:
+            raise ValueError(f'Home capture pose changed: joints={math.degrees(joint_drift):.3f}deg '
+                             f'grippers={gripper_drift:.4f}')
         stamps = [f['monotonic'] for f in frames.values()]
-        if (set(frames) != {'left','top','right'} or max(stamps)-min(stamps) > .15
-                or end-start > 1.0 or any(not start <= t <= end or end-t > .25 for t in stamps)
-                or any(abs(a-b) > math.radians(.25) for a,b in zip(q,before_q))
-                or any(abs(a-b) > .01 for a,b in zip(g,before_g))):
-            raise ValueError('Home capture is not coherent')
+        if (max(stamps)-min(stamps) > .15 or end-start > 1.0
+                or any(not start <= t <= end or end-t > .25 for t in stamps)):
+            raise CaptureFreshnessError(
+                f'Home capture freshness failed: bracket={end-start:.3f}s '
+                f'skew={max(stamps)-min(stamps):.3f}s age={end-min(stamps):.3f}s '
+                f'outside_bracket={any(not start <= t <= end for t in stamps)}')
         scene = dict(version=1, scene_id=uuid.uuid4().hex, robot_id=self.config['robot_id'],
             config_sha256=self.fingerprint(), boot_id=self.boot_id, captured_at=wall,
             camera_map=dict(self.config['cameras']), encoder_bracket_s=end-start,
