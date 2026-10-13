@@ -88,17 +88,22 @@ class Cam:
             self._open_capture()
         print(f"[relay] /dev/video{self.dev}: {'reopened' if self.ok else 'reopen FAILED'}", flush=True)
 
-    def fresh_jpeg(self):
+    def fresh_frame(self):
+        """Read pixels and their source timestamps under the same capture lock."""
         with self.lock:
-            jpeg = self.jpeg
-            last_frame_mono = self.last_frame_mono
-            error = self.error
-        if jpeg is None or last_frame_mono <= 0:
-            return None, "no frame yet" if not error else error
-        age_s = time.monotonic() - last_frame_mono
-        if age_s > self.stale_timeout_s:
-            return None, f"stale frame age={age_s:.2f}s"
-        return jpeg, ""
+            jpeg, mono, wall, sequence, error = (
+                self.jpeg, self.last_frame_mono, self.last_frame_wall,
+                self.frame_count, self.error)
+        reason = ""
+        if jpeg is None or mono <= 0:
+            reason = error or "no frame yet"
+        elif time.monotonic()-mono > self.stale_timeout_s:
+            reason = f"stale frame age={time.monotonic()-mono:.2f}s"
+        return (None if reason else jpeg), wall, mono, sequence, reason
+
+    def fresh_jpeg(self):
+        jpeg, _, _, _, reason = self.fresh_frame()
+        return jpeg, reason
 
     def status(self):
         with self.lock:
@@ -181,7 +186,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             with cam.lock:
-                jpeg, captured, sequence = cam.jpeg, cam.last_frame_mono, cam.frame_count
+                jpeg, captured, captured_wall, sequence = cam.jpeg, cam.last_frame_mono, cam.last_frame_wall, cam.frame_count
             if jpeg is None or time.monotonic() - captured > cam.stale_timeout_s:
                 self.send_error(503, 'No fresh camera frame')
                 return
@@ -190,6 +195,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('Content-Length', str(len(jpeg)))
             self.send_header('X-Capture-Monotonic', str(captured))
+            self.send_header('X-Captured-At', str(captured_wall))
             self.send_header('X-Frame-Sequence', str(sequence))
             self.end_headers()
             self.wfile.write(jpeg)
@@ -228,7 +234,7 @@ class Handler(BaseHTTPRequestHandler):
         last = None
         try:
             while True:
-                jpeg, stale_reason = cam.fresh_jpeg()
+                jpeg, captured_wall, captured, sequence, stale_reason = cam.fresh_frame()
                 if jpeg is None:
                     time.sleep(0.05)
                     continue
@@ -242,7 +248,8 @@ class Handler(BaseHTTPRequestHandler):
                 last = jpeg
                 self.wfile.write(BOUNDARY + b"\r\n")
                 self.wfile.write(b"Content-Type: image/jpeg\r\n")
-                self.wfile.write(f"Content-Length: {len(jpeg)}\r\n\r\n".encode())
+                self.wfile.write(f"Content-Length: {len(jpeg)}\r\n".encode())
+                self.wfile.write(f"X-Captured-At: {captured_wall}\r\nX-Capture-Monotonic: {captured}\r\nX-Frame-Sequence: {sequence}\r\n\r\n".encode())
                 self.wfile.write(jpeg + b"\r\n")
         except (BrokenPipeError, ConnectionResetError):
             print(f"[relay] client {self.client_address} left /{key}", flush=True)

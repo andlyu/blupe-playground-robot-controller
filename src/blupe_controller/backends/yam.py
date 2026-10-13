@@ -15,6 +15,8 @@ def run(config):
     from scripts import yam_operator_hardware_web as hardware
     state = DEFAULT_CONFIG.parent / 'state'
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    from YAM_control.home_scene import install as install_home_scene
+    install_home_scene(hardware, config, state / 'home-scene.json')
     os.environ['YAM_AUTO_QUEUE_STATE'] = str(state / 'auto-queue.json')
     # Start paused even if a previous run left a park receipt. Setup/installation
     # must never replay an automatic-start authorization.

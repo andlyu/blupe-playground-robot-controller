@@ -98,12 +98,14 @@ class SessionApiSimClient:
                 "schema_version": 1,
                 "type": "register",
                 "jetson_id": self.jetson_id,
+                "home_scene_version": 1,
                 "reconnect": hasattr(self.bridge, "api_transport_paused"),
                 "resume": resume,
             }))
             registered = json.loads(await asyncio.wait_for(socket.recv(), timeout=5.0))
             if registered.get("type") != "registered" or registered.get("jetson_id") != self.jetson_id:
                 raise RuntimeError(f"Session API registration failed: {registered}")
+            self.bridge.api_home_scene_supported = registered.get('home_scene_version') == 1
             self.reconnect_grace_s = min(30.0, float(registered.get('reconnect_grace_s', 0)))
             if resume and not registered.get('resumed'):
                 await asyncio.to_thread(self.bridge.api_connection_changed, False, 'session_not_resumable')
