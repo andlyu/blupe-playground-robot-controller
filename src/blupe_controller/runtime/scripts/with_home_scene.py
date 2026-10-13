@@ -15,6 +15,9 @@ def main():
     sys.path.insert(0, str(root))
     import YAM_control
     public_runtime = Path(__file__).resolve().parents[1]
+    # Nested launchers prepend sys.path, which recalculates namespace paths.
+    # Freeze the installed-first search order so the public extension survives.
+    YAM_control.__path__ = list(YAM_control.__path__)
     YAM_control.__path__.append(str(public_runtime / 'YAM_control'))
     from scripts import yam_operator_hardware_web as hardware
     original_main = hardware.base.main
