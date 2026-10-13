@@ -853,10 +853,11 @@ class PhysicalOperator(base.OperatorSimulator):
         else:
             # Preserve the recorded terminal reason before revoking the lease.
             self._hold_physical(payload.get("reason") or "session_api_stop")
-            if self.auto_queue.enabled or payload.get("reason") == "policy_complete":
+            capture_home = payload.get("reason") in {"policy_complete", "user_requested"}
+            if self.auto_queue.enabled or capture_home:
                 with self.lock:
                     self._policy_deadline = None
-                self.auto_queue.policy_completed(capture_home=payload.get("reason") == "policy_complete")
+                self.auto_queue.policy_completed(capture_home=capture_home)
 
     def _park_after_policy_timeout(self):
         with self._physical_lock:
