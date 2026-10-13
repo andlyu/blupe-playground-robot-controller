@@ -13,11 +13,7 @@ import uuid
 from YAM_control.training_recorder import RelayFrames, atomic_json
 
 
-def home_duration(mean_s, calibration_s, settling_s=1.0):
-    """Only slow the normal safe path; unknown means keep normal cold startup."""
-    if type(mean_s) not in (int,float) or not math.isfinite(mean_s) or mean_s <= 0:
-        return None
-    return min(30., max(0., mean_s-calibration_s-settling_s))
+CACHED_HOME_DURATION_S = 10.0
 
 
 class HomeScene:
@@ -144,13 +140,20 @@ class HomeScene:
         calibration_s = time.monotonic()-self.timing['started_monotonic']
         queue = self.op.queue_snapshot().get('entries', [])
         hint = (queue[0].get('home_planning') or {}) if queue else {}
-        mean = None
-        if (self.offer and queue and queue[0]['session_id'] == self.offer['session_id']
-                and hint.get('config_sha256') == self.fingerprint() and hint.get('sample_count',0) > 0):
-            mean = hint.get('mean_first_plan_s')
+        offered_scene = (self.offer or {}).get('scene') or {}
+        captured_at = offered_scene.get('captured_at')
+        using_cache = bool(
+            getattr(self.op, 'api_home_scene_supported', False)
+            and self.offer and queue and queue[0]['session_id'] == self.offer['session_id']
+            and hint.get('profile')
+            and hint.get('config_sha256') == offered_scene.get('config_sha256') == self.settling_config
+            and type(captured_at) in (int, float) and 0 <= time.time()-captured_at <= 120)
+        # Pace the Home motion itself, independently of calibration or inference
+        # history. The planner still keeps any longer duration its limits require.
+        duration = CACHED_HOME_DURATION_S if using_cache else None
         settling = sum(self.settling_samples)/len(self.settling_samples) if self.settling_samples else 1.0
-        duration = home_duration(mean,calibration_s,settling)
-        self.timing.update(calibration_s=calibration_s, mean_first_plan_s=mean,
+        self.timing.update(calibration_s=calibration_s, using_cache=using_cache,
+                           mean_first_plan_s=hint.get('mean_first_plan_s'),
                            sample_count=hint.get('sample_count',0), target_home_s=duration,
                            settling_allowance_s=settling, settling_basis='measured' if self.settling_samples else 'provisional default')
         return duration
