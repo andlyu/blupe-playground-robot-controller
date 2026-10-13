@@ -856,7 +856,7 @@ class PhysicalOperator(base.OperatorSimulator):
             if self.auto_queue.enabled or payload.get("reason") == "policy_complete":
                 with self.lock:
                     self._policy_deadline = None
-                self.auto_queue.policy_completed()
+                self.auto_queue.policy_completed(capture_home=payload.get("reason") == "policy_complete")
 
     def _park_after_policy_timeout(self):
         with self._physical_lock:
@@ -1318,7 +1318,9 @@ class PhysicalOperator(base.OperatorSimulator):
             self._physical_event = self.event
         return self.event
 
-    def _move_home(self, *, cancel_event=None):
+    def _move_home(self, *, cancel_event=None, target_duration_s=None):
+        if target_duration_s is None:
+            target_duration_s = getattr(self, '_home_scene_target_duration', None)
         if self._physical.state != AdapterState.STOPPED:
             return "Move Home blocked: launch both physical arms first"
         initial = self._physical.snapshot()
@@ -1332,7 +1334,7 @@ class PhysicalOperator(base.OperatorSimulator):
             self._safety_config.joint_lower_rad,
             self._safety_config.joint_upper_rad,
         )
-        waypoints = self._bounded_ramp(legal_start, self.home)
+        waypoints = self._bounded_ramp(legal_start, self.home, minimum_duration_s=target_duration_s)
         if not np.array_equal(start, legal_start):
             waypoints = (
                 tuple(float(value) for value in legal_start),
@@ -1365,6 +1367,7 @@ class PhysicalOperator(base.OperatorSimulator):
                 self._physical_event = message
             return message
 
+        motion_started = time.monotonic()
         try:
             with self.lock:
                 self.mode = "MOVING_HOME"
@@ -1428,6 +1431,9 @@ class PhysicalOperator(base.OperatorSimulator):
             self.policy_phase = "home_settled"
             self.event = "Both physical arms settled at Home; Safety Guardrails active"
             self._physical_event = self.event
+        scene = getattr(self, "home_scene", None)
+        if scene is not None:
+            scene.home_finished(time.monotonic()-motion_started, len(approved.waypoints)/approved.cadence_hz)
         return self.event
 
     def _hold_physical(self, reason):
@@ -1531,7 +1537,7 @@ class PhysicalOperator(base.OperatorSimulator):
             images=self._camera_references_locked(),
         )
 
-    def _bounded_ramp(self, start, target):
+    def _bounded_ramp(self, start, target, *, minimum_duration_s=None):
         # Home/Park still need a measured hold (and gripper handling) at target.
         if np.array_equal(start, target):
             return (tuple(float(value) for value in target),)
@@ -1541,6 +1547,7 @@ class PhysicalOperator(base.OperatorSimulator):
             max_velocity_rad_s=self._safety_config.max_joint_velocity_rad_s,
             max_acceleration_rad_s2=DEFAULT_MAX_ACCELERATION_RAD_S2,
             max_jerk_rad_s3=DEFAULT_MAX_JERK_RAD_S3,
+            minimum_duration_s=minimum_duration_s,
         ).positions
 
     def _set_safety_pose(self, joints):

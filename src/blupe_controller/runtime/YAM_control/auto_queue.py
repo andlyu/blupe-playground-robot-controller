@@ -25,6 +25,7 @@ class AutoQueue:
         self.parked = False
         self.running = False
         self.completion_pending = False
+        self.capture_home_pending = False
         self.ready_deadline = None
         self.cancel = threading.Event()
         self.thread = None
@@ -135,10 +136,11 @@ class AutoQueue:
                 and not op.cleanup_state['running'] and not op.stop_event.is_set()
             )
 
-    def policy_completed(self):
+    def policy_completed(self, *, capture_home=False):
         with self.lock:
             # Completion cleanup must run even when automatic starts are paused.
             self.completion_pending = True
+            self.capture_home_pending = capture_home
             self.ready_deadline = None
             self._message('Run ended; checking the next queued run')
 
@@ -235,8 +237,27 @@ class AutoQueue:
                 self.cancel = threading.Event()
                 cancel = self.cancel
             try:
+                capture_home = self.capture_home_pending
                 self.completion_pending = False
+                self.capture_home_pending = False
                 self.invalidate_park()
+                scene = getattr(op, 'home_scene', None)
+                if continuation and capture_home and scene is not None:
+                    self._check(cancel)
+                    self._message('Run complete; returning Home for the next planning scene')
+                    result = op._move_home(cancel_event=cancel)
+                    self._check(cancel)
+                    status = op.status()
+                    if status['mode'] != 'READY' or not status['homed'] or not status['settled']:
+                        raise RuntimeError(result)
+                    try:
+                        scene.capture(cancel)
+                    except Exception as exc:
+                        scene.invalidate()
+                        LOGGER.info('[home-scene] capture unavailable: %s', type(exc).__name__)
+                    self._return_to_rest(cancel, 'Run complete; home scene capture finished')
+                    return
+
                 if continuation:
                     try:
                         waiting = self.enabled and op.api_connected and self._queue_waiting()
@@ -248,6 +269,12 @@ class AutoQueue:
                     self._message('Run ended; preparing the next queued run')
                 else:
                     self._message('Queue detected; launching both arms')
+                    if scene is not None:
+                        try:
+                            scene.start()
+                        except Exception as exc:
+                            scene.invalidate()
+                            LOGGER.info("[home-scene] offer unavailable: %s", type(exc).__name__)
                     op._launch_physical(cancel_event=cancel)
                 self._check(cancel)
                 # Torque-off arms may settle away from zero. Launch holds fresh
@@ -258,7 +285,21 @@ class AutoQueue:
                     self._return_to_rest(cancel, 'Queue cleared before Home')
                     return
                 self._message('Moving both arms to Home')
-                result = op._move_home(cancel_event=cancel)
+                duration = None
+                if scene is not None and not continuation:
+                    try:
+                        duration = scene.duration()
+                    except Exception as exc:
+                        LOGGER.info("[home-scene] timing unavailable: %s", type(exc).__name__)
+                home_started = time.monotonic()
+                if duration is None:
+                    result = op._move_home(cancel_event=cancel)
+                else:
+                    result = op._move_home(cancel_event=cancel, target_duration_s=duration)
+                if scene is not None:
+                    scene.timing.update(scene.last_home)
+                    scene.timing['actual_home_s'] = time.monotonic()-home_started
+                    LOGGER.info('[home-scene] startup timing %s', scene.timing)
                 self._check(cancel)
                 status = op.status()
                 if status['mode'] != 'READY' or not status['homed']:

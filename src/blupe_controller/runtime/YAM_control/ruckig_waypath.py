@@ -99,6 +99,7 @@ def plan_joint_trajectory(
     max_velocity_rad_s: float = DEFAULT_MAX_VELOCITY_RAD_S,
     max_acceleration_rad_s2: float = DEFAULT_MAX_ACCELERATION_RAD_S2,
     max_jerk_rad_s3: float = DEFAULT_MAX_JERK_RAD_S3,
+    minimum_duration_s: float | None = None,
 ) -> JointTrajectoryPlan:
     """Generate local state-to-state segments, stopping smoothly at each keyframe."""
     from ruckig import DurationDiscretization, InputParameter, Result, Ruckig, Trajectory
@@ -106,6 +107,10 @@ def plan_joint_trajectory(
     points = np.asarray(keyframes, dtype=np.float64)
     if points.ndim != 2 or len(points) < 2 or not np.all(np.isfinite(points)):
         raise WaypathPlanningError("keyframes must contain at least two finite joint vectors")
+    if minimum_duration_s is not None:
+        if (type(minimum_duration_s) not in (int,float) or not math.isfinite(minimum_duration_s)
+                or not 0 <= minimum_duration_s <= 30 or len(points) != 2):
+            raise ValueError("Home minimum duration must be 0..30 seconds for one segment")
     dofs = int(points.shape[1])
     cadence = _positive(cadence_hz, "cadence_hz")
     velocity_limit = _positive(max_velocity_rad_s, "max_velocity_rad_s")
@@ -132,6 +137,8 @@ def plan_joint_trajectory(
         inp.max_velocity = [velocity_limit] * dofs
         inp.max_acceleration = [acceleration_limit] * dofs
         inp.max_jerk = [jerk_limit] * dofs
+        if minimum_duration_s is not None:
+            inp.minimum_duration = minimum_duration_s
         inp.duration_discretization = DurationDiscretization.Discrete
         otg = Ruckig(dofs, period)
         otg.validate_input(inp, True, True)
