@@ -9,11 +9,24 @@ import logging
 from pathlib import Path
 import time
 import uuid
+from urllib.request import urlopen
 
-from YAM_control.training_recorder import RelayFrames, atomic_json
+from YAM_control.training_recorder import atomic_json
 
 
 CACHED_HOME_DURATION_S = 10.0
+
+
+def capture_frame(name, device):
+    # Home planning compares model-camera pixels. Recording clients may resize
+    # frames and require private connection state, so read the raw relay here.
+    with urlopen(f'http://127.0.0.1:8089/{device}/snapshot.jpg', timeout=.5) as response:
+        jpeg = response.read(4 * 1024 * 1024 + 1)
+        stamp = float(response.headers['X-Capture-Monotonic'])
+        sequence = int(response.headers['X-Frame-Sequence'])
+    if len(jpeg) > 4 * 1024 * 1024 or not jpeg.startswith(b'\xff\xd8') or not math.isfinite(stamp):
+        raise ValueError('Invalid timestamped Home JPEG')
+    return name, dict(jpeg=jpeg, monotonic=stamp, sequence=sequence)
 
 
 class HomeScene:
@@ -29,6 +42,7 @@ class HomeScene:
         self.settling_samples = []
         self.settling_config = None
         self.last_home = {}
+        self.capture_error = None
 
     def fingerprint(self):
         config = self.config
@@ -77,17 +91,24 @@ class HomeScene:
         return joints,grips
 
     def capture(self, cancel):
+        self.capture_error = None
+        try:
+            return self._capture(cancel)
+        except Exception as exc:
+            self.capture_error = f'{type(exc).__name__}: {exc}'[:200]
+            raise
+
+    def _capture(self, cancel):
         self.invalidate()
         start = time.monotonic()
         before_q,before_g = self._measured()
         if cancel.is_set():
             return
-        source = type('Source', (), {'origin':'http://127.0.0.1:8089'})()
         with ThreadPoolExecutor(max_workers=3) as pool:
             for _ in range(4):
                 if cancel.wait(.05):
                     return
-                jobs = [pool.submit(RelayFrames.one, source, name, str(device))
+                jobs = [pool.submit(capture_frame, name, str(device))
                         for name,device in self.config['cameras'].items()]
                 frames = dict(job.result() for job in jobs)
                 if all(f['monotonic'] >= start for f in frames.values()):
@@ -203,7 +224,8 @@ def install(hardware, config, path=None):
             scene = getattr(self, 'home_scene', None)
             result['home_scene'] = dict(version=1,
                 api_supported=bool(getattr(self, 'api_home_scene_supported', False)),
-                cached=bool(scene and scene.scene), offered=bool(scene and scene.offer))
+                cached=bool(scene and scene.scene), offered=bool(scene and scene.offer),
+                capture_error=scene.capture_error if scene else None)
             return result
         def _move_home(self, *, cancel_event=None, target_duration_s=None):
             # Older custom subclasses forward only cancel_event. The base
