@@ -180,3 +180,82 @@ def test_session_transport_stop_does_not_wait_for_executor_completion():
         release.set();await asyncio.gather(*client.execution_tasks)
         assert client.outbound.get_nowait()['status']=='completed'
     asyncio.run(check())
+
+
+def replay_operator(*, failed=False, gate=None):
+    op=operator();x=CubeSessionExecutor(op)
+    primary=SimpleNamespace(finished=threading.Event(),request_id=None,
+        bridge=SimpleNamespace(error=None),load=Mock(return_value=(np.full((3,14),.05),
+            dict(episode='physical-123',return_home=False))))
+    primary.finished.set();cancel=threading.Event()
+    engine=SimpleNamespace(guard=x.guard(),state=dict(running=False),thread=None)
+    def begin(actions,**kwargs):
+        engine.state=dict(running=True,phase='preflight',total=len(actions),completed=0)
+        def run():
+            try:
+                if gate is not None: assert gate.wait(2)
+                engine.guard.approve(np.zeros(12),(np.full(12,.05),),cadence_hz=10.)
+                engine.state.update(phase='failed' if failed or cancel.is_set() else 'complete',
+                    error='failure' if failed else None,completed=len(actions),finish_action='held')
+            except Exception:
+                engine.state.update(phase='stopped',error='Stopped')
+            finally:engine.state['running']=False;primary.finished.set()
+        engine.thread=threading.Thread(target=run);engine.thread.start()
+    engine._begin=begin;primary.engine=engine;primary.cancel=cancel.set
+    primary.status=lambda:dict(engine.state,request_id=primary.request_id,
+        motor_owner='primary_controller',controller_fault=None)
+    op.primary_replay=primary
+    return op,x,primary,cancel
+
+
+def preview_replay(x):
+    return x.request(request('preview',motion_kind='recorded_replay',
+        execution_policy='controller-faults',replay_request_id='a'*32,
+        recipe=dict(episode='physical-123',return_home=False)))
+
+
+def test_saved_replay_uses_existing_loader_engine_and_keeps_session_owner():
+    op,x,p,cancel=replay_operator();plan=preview_replay(x)
+    p.load.assert_called_once_with('physical-123',True,dict(episode='physical-123',return_home=False))
+    original=p.engine.guard
+    x.request(request('execute',plan_id=plan['plan_id']));assert x.finished.wait(2)
+    assert x.status()['state']=='holding'
+    assert x.status()['replay_result']['request_id']=='a'*32
+    assert op.mode=='API_ACTIVE' and op.api_lease_id=='lease'
+    assert p.engine.guard is original and p.finished.is_set()
+    op._physical.execute.assert_not_called()  # Existing Replay engine owns dispatch.
+    with pytest.raises(ValueError):x.request(request('execute',plan_id=plan['plan_id']))
+
+
+def test_failed_replay_cannot_report_successful_handoff():
+    op,x,p,cancel=replay_operator(failed=True);plan=preview_replay(x)
+    x.request(request('execute',plan_id=plan['plan_id']));assert x.finished.wait(2)
+    assert x.status()['state']=='failed' and 'replay_result' not in x.status()
+    op._hold_physical.assert_called_once()
+
+
+def test_stop_during_replay_cancels_engine_and_late_finish_cannot_restore_lease():
+    gate=threading.Event();op,x,p,cancel=replay_operator(gate=gate);plan=preview_replay(x)
+    x.request(request('execute',plan_id=plan['plan_id']))
+    x.abort();assert cancel.is_set()
+    op.mode='DISABLED';op.api_lease_id=None;op._hardware_pending=None
+    gate.set();assert x.finished.wait(2)
+    assert x.status()['state']=='interrupted' and op.mode=='DISABLED'
+    assert op._hardware_pending is None and op.api_lease_id is None
+
+
+def test_stop_during_replay_load_prevents_start():
+    op,x,p,cancel=replay_operator();load=p.load.side_effect
+    def stopped(*args):x.abort();return p.load.return_value
+    p.load.side_effect=stopped
+    with pytest.raises(TrajectoryInterrupted):preview_replay(x)
+    assert p.engine.thread is None
+
+
+def test_camera_clear_home_uses_existing_native_home_without_owner_transition():
+    op=operator();op.home=np.full(12,.03);op.park_pose=np.full(12,-.2)
+    x=CubeSessionExecutor(op)
+    plan=x.request(request('preview',motion_kind='camera_clear_home',execution_policy='controller-faults'))
+    x.request(request('execute',plan_id=plan['plan_id']));assert x.finished.wait(2)
+    assert np.allclose(op._physical.execute.call_args.args[0][-1],op.home)
+    assert x.status()['reached_target'] and op.mode=='API_ACTIVE'

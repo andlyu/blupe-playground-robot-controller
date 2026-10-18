@@ -31,3 +31,18 @@ Deployment must preserve the live adapter and unrelated wrappers, source-check
 and back up changes, then activate only with fresh verified torque-off and no
 active run. Check `cube_reset_session` status after activation. Offline tests and
 inert coordinator/adapter tests do not establish a physical reset completion.
+# Recorded Replay under the same lease
+
+Preview accepts `motion_kind: recorded_replay` with the configured saved recipe
+and one `replay_request_id`. It reuses the installed PrimaryReplay loader and
+qualified engine (source/calibration/edit checks and its existing motor guards).
+It does not call manual Replay admission or switch API_ACTIVE to REPLAYING.
+The engine's guard additionally checks the current session lease at each approval;
+normal Hold/Stop cancels its existing event. Completion waits for the existing
+engine thread to release its physical lock and requires the matching full
+complete/Hold receipt. A late finish cannot restore a revoked lease.
+
+`motion_kind: camera_clear_home` uses the native `home` target and current grippers
+through the existing bounded pose executor. It does not invoke Park, initialization
+or torque-off. The caller verifies measured Home before any tabletop sensing.
+Ordinary cube pose requests and default validation behavior remain unchanged.

@@ -8,6 +8,7 @@ from functools import lru_cache
 import hashlib
 import inspect
 import os
+import re
 from types import SimpleNamespace
 import textwrap
 import threading
@@ -86,6 +87,7 @@ class CubeSessionExecutor:
             completion_wait_supported=True, execution_policy=self.policy,
             controller_fault=getattr(self.op._physical, 'fault', None),
             cube_timing_profile=TIMING_PROFILE if qualified_ramp(type(self.op)) else None,
+            recorded_replay_supported=hasattr(self.op, 'primary_replay'),
             motor_owner='session_api')
 
     def abort(self):
@@ -94,6 +96,8 @@ class CubeSessionExecutor:
         if self.op.api_lease_id is not None:
             self.stopped_identity = (self.op.api_session_id, self.op.api_episode_id, self.op.api_lease_id)
         self.cancel.set()
+        if self.active and self.plan and self.plan.get('kind') == 'recorded_replay':
+            self.op.primary_replay.cancel()
 
     def authorized(self, identity):
         op = self.op
@@ -168,6 +172,16 @@ class CubeSessionExecutor:
                     raise ValueError('Another session command is active')
             if payload.get('execution_policy') != self.policy:
                 raise ValueError('Requested reset profile differs from operator selection')
+            kind = payload.get('motion_kind', 'pose')
+            if kind == 'recorded_replay':
+                return self.preview_replay(identity, payload)
+            if kind not in ('pose', 'camera_clear_home'):
+                raise ValueError('Unknown reset sequence motion')
+            if kind == 'camera_clear_home':
+                # The same configured native Home target, under this lease.
+                snapshot = self.op._physical.snapshot()
+                payload = dict(payload, joints_rad=list(self.op.home),
+                    grippers=[snapshot.left.gripper, snapshot.right.gripper])
             q, g = np.asarray(payload.get('joints_rad'), float), np.asarray(payload.get('grippers'), float)
             if q.shape != (12,) or not np.isfinite(q).all():
                 raise ValueError('Expected twelve finite encoder radians')
@@ -191,15 +205,96 @@ class CubeSessionExecutor:
                     raise ValueError('Another session command became active during preview')
                 self.cancel = threading.Event()
                 self.plan = dict(id=uuid.uuid4().hex, identity=identity, target=q,
-                    grippers=g, floor=floor, used=False)
+                    grippers=g, floor=floor, used=False, kind=kind)
                 self.result = dict(state='previewed', plan_id=self.plan['id'],
                     duration_s=len(points)/10., duration_floor_s=floor,
                     geometry_checks=self.policy != 'controller-faults')
                 return self.status()
 
+    def preview_replay(self, identity, payload):
+        primary = getattr(self.op, 'primary_replay', None)
+        recipe, request_id = payload.get('recipe'), payload.get('replay_request_id')
+        if (primary is None or self.policy != 'controller-faults'
+                or not isinstance(recipe, dict) or recipe.get('return_home') is not False
+                or not isinstance(request_id, str) or not re.fullmatch('[a-f0-9]{32}', request_id)):
+            raise ValueError('A configured recorded Replay and existing selected profile are required')
+        # Existing loader checks saved source hash, calibration, edit and timing.
+        actions, selected = primary.load(recipe.get('episode'), True, recipe)
+        with self.op.lock:
+            self.check(identity)
+            if (self.op._hardware_pending is not None or primary.status()['running']
+                    or not primary.finished.is_set()):
+                raise ValueError('Another session command is active')
+            self.cancel = threading.Event()
+            self.plan = dict(id=uuid.uuid4().hex, identity=identity, kind='recorded_replay',
+                actions=actions, recipe=deepcopy(selected), replay_request_id=request_id, used=False)
+            self.result = dict(state='previewed', plan_id=self.plan['id'],
+                motion_kind='recorded_replay', replay_recipe=deepcopy(selected))
+            return self.status()
+
+    def run_replay(self, plan):
+        op, primary = self.op, self.op.primary_replay
+        engine = primary.engine
+        original_guard = engine.guard
+        owner = self
+        class LeaseGuard:
+            def __getattr__(self, name):
+                return getattr(original_guard, name)
+            def approve(self, *args, **kwargs):
+                owner.check(plan['identity'])
+                if owner.cancel.is_set():
+                    raise TrajectoryInterrupted('Reset Replay session cancelled')
+                return original_guard.approve(*args, **kwargs)
+        try:
+            with op.lock:
+                self.check(plan['identity'])
+                if self.cancel.is_set() or op._hardware_pending is not plan['pending']:
+                    raise TrajectoryInterrupted('Reset Replay cancelled before dispatch')
+                primary.request_id = plan['replay_request_id']
+                primary.final_target = plan['actions'][-1, [0,1,2,3,4,5,7,8,9,10,11,12]].copy()
+                primary.bridge.error = None
+                primary.finished.clear()
+                engine.guard = LeaseGuard()
+                op.policy_phase = 'reset_box_replay'
+                op.auto_queue.invalidate_park()
+                self.result['state'] = 'executing'
+                engine._begin(plan['actions'], episode=plan['recipe']['episode'], kind='replay')
+                engine.state.update(edit_recipe=deepcopy(plan['recipe']), edited=True)
+            while engine.thread.is_alive():
+                if self.cancel.is_set() or not self.authorized(plan['identity']):
+                    primary.cancel()
+                engine.thread.join(.1)
+            replay = primary.status()
+            with self.lock, op.lock:
+                self.check(plan['identity'])
+                if (self.cancel.is_set() or op._hardware_pending is not plan['pending']
+                        or replay.get('request_id') != plan['replay_request_id']
+                        or replay.get('phase') != 'complete' or replay.get('running') is not False
+                        or replay.get('error') or replay.get('controller_fault')
+                        or replay.get('finish_action') != 'held' or not replay.get('total')
+                        or replay.get('completed') != replay['total']):
+                    raise TrajectoryInterrupted('Recorded Replay did not complete; no handoff')
+                snapshot = op._physical.snapshot()
+                measured = np.asarray(snapshot.left.joints_rad + snapshot.right.joints_rad)
+                op.data.qpos[:12] = measured
+                op.data.qvel[:] = 0.
+                op.data.ctrl[:12] = primary.final_target
+                op.target = primary.final_target.copy()
+                op._hardware_pending = None
+                op.policy_phase = 'waiting_for_command'
+                self.result.update(state='holding', replay_result=replay,
+                    motion_kind='recorded_replay', measured_rad=measured.tolist())
+        finally:
+            engine.guard = original_guard
+            if engine.thread is None or not engine.thread.is_alive():
+                primary.finished.set()
+
     def run(self, plan):
         op = self.op
         try:
+            if plan.get('kind') == 'recorded_replay':
+                self.run_replay(plan)
+                return
             self.check(plan['identity'])
             initial = op._physical.snapshot()
             start = np.asarray(initial.left.joints_rad + initial.right.joints_rad)
