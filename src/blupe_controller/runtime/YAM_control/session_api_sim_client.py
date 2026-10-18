@@ -44,6 +44,7 @@ class SessionApiSimClient:
         self.reconnect_grace_s = 0.0
         self.disconnected_at = None
         self.pending_outbound = None
+        self.execution_tasks = set()
         self.thread = threading.Thread(target=self._thread_main, daemon=True)
 
     def start(self) -> None:
@@ -160,6 +161,12 @@ class SessionApiSimClient:
         elif message_type == "joint_trajectory":
             for response in await asyncio.to_thread(self.bridge.api_handle_joint_trajectory, payload):
                 self.send(response)
+        elif message_type == "execution_request":
+            # An executor may wait for a pose. Stop and heartbeat traffic must
+            # remain responsive on this same authenticated connection.
+            task = asyncio.create_task(self._execution_request(payload))
+            self.execution_tasks.add(task)
+            task.add_done_callback(self.execution_tasks.discard)
         elif message_type == "stop_session":
             await asyncio.to_thread(self.bridge.api_handle_stop, payload)
         elif "error" in payload:
@@ -172,3 +179,16 @@ class SessionApiSimClient:
                 raise ConnectionError("server lost robot registration; reconnecting")
         else:
             raise RuntimeError(f"unsupported Session API message type: {message_type}")
+
+    async def _execution_request(self, payload):
+        response = {k:payload.get(k) for k in ('session_id','episode_id','lease_id','request_id')}
+        response.update(schema_version=1,type='execution_result')
+        try:
+            handler = getattr(self.bridge,'api_handle_execution',None)
+            if handler is None:
+                raise ValueError('This robot does not support the requested executor')
+            result = await asyncio.to_thread(handler,payload)
+            response.update(status='completed',result=result)
+        except Exception as exc:
+            response.update(status='failed',error=str(exc)[:1000] if isinstance(exc,(ValueError,RuntimeError)) else type(exc).__name__)
+        self.send(response)
