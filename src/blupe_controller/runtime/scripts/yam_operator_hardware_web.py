@@ -1228,95 +1228,9 @@ class PhysicalOperator(base.OperatorSimulator):
                 with self.lock:
                     self._fault_recovery_cancel = None
 
-    def _park_zero_and_stop(self, *, cancel_event=None):
-        with self.lock:
-            if self.mode not in {"STOPPED", "READY"} or self.api_lease_id is not None:
-                return (
-                    "Park at Zero blocked: arms must be initialized and idle; "
-                    "use Emergency Stop if motion is active"
-                )
-        if self._physical.state != AdapterState.STOPPED:
-            return (
-                "Park at Zero blocked: arms must be initialized and idle; "
-                "use Emergency Stop if motion is active"
-            )
-
-        start = self._physical_joints()
-        target = np.zeros(base.N_JOINTS, dtype=np.float64)
-        legal_start = np.clip(
-            start,
-            self._safety_config.joint_lower_rad,
-            self._safety_config.joint_upper_rad,
-        )
-        waypoints = self._bounded_ramp(legal_start, target)
-        if not np.array_equal(start, legal_start):
-            waypoints = (tuple(float(value) for value in legal_start), *waypoints)
-        try:
-            approved = self._safety_guardrails.approve(
-                start,
-                waypoints,
-                cadence_hz=LOCAL_CADENCE_HZ,
-                target_limit_tolerance_rad=HOME_WAYPOINT_LIMIT_TOLERANCE_RAD,
-            )
-        except Exception as exc:
-            message = f"Park at Zero rejected before motion: {type(exc).__name__}: {exc}"
-            LOGGER.error(message, exc_info=True)
-            self._stop_physical("park_validation_failure")
-            with self.lock:
-                self.event = f"{message}; {self._physical_event}"
-                self._physical_event = self.event
-            return self.event
-
-        try:
-            with self.lock:
-                self.mode = "PARKING_ZERO"
-                self.command_source = "operator"
-                self.policy_phase = "parking_at_zero"
-                self.event = "Parking both physical arms at joint zero"
-                self._physical_event = self.event
-            snapshot = self._physical.execute(
-                approved.waypoints,
-                cadence_hz=approved.cadence_hz,
-                settle_tolerance_rad=self.settle_tolerance,
-                cancel_event=cancel_event,
-            )
-            joints = np.asarray(
-                snapshot.left.joints_rad + snapshot.right.joints_rad,
-                dtype=np.float64,
-            )
-            with self.lock:
-                self.data.qpos[:base.N_JOINTS] = np.clip(joints, self.lower, self.upper)
-                self.data.qvel[:] = 0.0
-                self.data.ctrl[:base.N_JOINTS] = self.data.qpos[:base.N_JOINTS]
-                self.target = self.data.qpos[:base.N_JOINTS].copy()
-        except TrajectoryInterrupted:
-            raise
-        except Exception as exc:
-            message = f"Park at Zero failed: {type(exc).__name__}: {exc}"
-            LOGGER.error(message, exc_info=True)
-            if isinstance(exc, ServoFaultHolding):
-                self._mark_servo_fault_holding(exc)
-            else:
-                self._stop_physical("park_execution_failure")
-            with self.lock:
-                self.event = f"{message}; {self._physical_event}"
-                self._physical_event = self.event
-            return self.event
-
-        self._stop_physical("operator_park_zero")
-        # The receipt is written only after settled zero feedback AND verified off.
-        # Stop cancellation must not be overwritten by a late park completion.
-        with self.auto_queue.lock:
-            if (self.mode == 'DISABLED' and self._physical.torque_off_verified
-                    and (cancel_event is None or not cancel_event.is_set())
-                    and np.max(np.abs(joints)) <= self.settle_tolerance):
-                self.auto_queue.mark_parked()
-        with self.lock:
-            if self.mode == "DISABLED":
-                self.policy_phase = "parked"
-                self.event = "Both physical arms parked at joint zero and torque-disabled"
-            self._physical_event = self.event
-        return self.event
+    def _park_zero_and_stop(self, *, cancel_event=None, hold=False):
+        from YAM_control.zero_control import park_zero_and_stop
+        return park_zero_and_stop(self, cancel_event=cancel_event, hold=hold)
 
     def _move_home(self, *, cancel_event=None):
         if self._physical.state != AdapterState.STOPPED:
