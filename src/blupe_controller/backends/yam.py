@@ -13,6 +13,8 @@ def run(config):
     runtime_path()
     os.environ["BLUPE_CAMERA_ROLES"] = json.dumps({k:str(v) for k,v in config["cameras"].items()})
     from scripts import yam_operator_hardware_web as hardware
+    from YAM_control.first_call_wander_integration import install
+    install(hardware)
     state = DEFAULT_CONFIG.parent / 'state'
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     from YAM_control.home_scene import install as install_home_scene
