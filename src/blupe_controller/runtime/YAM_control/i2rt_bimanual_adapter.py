@@ -251,9 +251,12 @@ class I2RTBimanualAdapter:
         settle_tolerance_rad: float = 0.02,
         settle_timeout_s: float = 3.0,
         disable_on_settle_timeout: bool = True,
+        wait_for_settle: bool = True,
         cancel_event: threading.Event | None = None,
     ) -> BimanualSnapshot:
         """Check and send each waypoint locally at the requested cadence."""
+        if not isinstance(wait_for_settle, bool):
+            raise ValueError('wait_for_settle must be boolean')
         if (
             cadence_hz <= 0
             or settle_tolerance_rad <= 0
@@ -344,6 +347,18 @@ class I2RTBimanualAdapter:
                 next_deadline += period
                 if self._stop_requested.wait(max(0.0, next_deadline - time.monotonic())):
                     raise TrajectoryInterrupted("trajectory interrupted; retaining last target")
+
+            if not wait_for_settle:
+                # Dispatch completion is not measured settling. Continuous
+                # policies opt in; ordinary trajectories keep their dwell.
+                if self._stop_requested.is_set() or (cancel_event is not None and cancel_event.is_set()):
+                    raise TrajectoryInterrupted('trajectory interrupted; retaining last target')
+                _verify_robot_health(left, 'left', self.left_channel)
+                _verify_robot_health(right, 'right', self.right_channel)
+                snapshot = _snapshot_robots(left, right)
+                with self._lock:
+                    self._state = AdapterState.STOPPED
+                return snapshot
 
             target = np.asarray(validated_waypoints[-1], dtype=np.float64)
             settled_since: float | None = None
